@@ -205,11 +205,17 @@ def select_households(
 
     selected_ids = set()
     main = []
+    selected_category_counts = {
+        CATEGORY_FEMALE_HEADED: 0,
+        CATEGORY_YOUTH: 0,
+        CATEGORY_OTHER: 0,
+    }
     for category in (CATEGORY_FEMALE_HEADED, CATEGORY_YOUTH, CATEGORY_OTHER):
         for household in by_category[category]:
-            if len([row for row in main if row.category == category]) >= quotas[category]:
+            if selected_category_counts[category] >= quotas[category]:
                 break
             selected_ids.add(household.id)
+            selected_category_counts[category] += 1
             main.append(SelectedHousehold(household, category, ROW_TYPE_MAIN))
 
     if len(main) < main_target:

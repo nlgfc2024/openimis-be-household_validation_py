@@ -82,9 +82,7 @@ class EligibleHouseholdSelectionService:
                 ta_filter |= Q(location_id=ta_id) | Q(location__parent_id=ta_id)
             if ta_code:
                 ta_filter |= Q(location__code=ta_code) | Q(location__parent__code=ta_code)
-            return queryset.filter(
-                ta_filter
-            )
+            return queryset.filter(ta_filter)
 
         if district_id or district_code:
             district_filter = Q()
@@ -100,19 +98,16 @@ class EligibleHouseholdSelectionService:
                     | Q(location__parent__code=district_code)
                     | Q(location__parent__parent__code=district_code)
                 )
-            return queryset.filter(
-                district_filter
-            )
+            return queryset.filter(district_filter)
         return queryset
 
     def _build_household(self, group):
         groupindividuals = list(group.groupindividuals.all())
-        eligible_members = [
-            self._build_member(group_individual)
-            for group_individual in groupindividuals
-            if self._is_fit_for_work(group_individual)
-        ]
-        eligible_members = [member for member in eligible_members if member is not None]
+        eligible_members = []
+        for group_individual in groupindividuals:
+            member = self._build_member(group_individual)
+            if member and member.fit_for_work:
+                eligible_members.append(member)
         if not eligible_members:
             return None
 
