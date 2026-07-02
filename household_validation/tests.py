@@ -91,6 +91,7 @@ def _household(
     head_gender="Male",
     eligible_member_age=40,
     last_verified_date=None,
+    eligible_members=None,
 ):
     head = _member(
         f"{household_id}-head",
@@ -98,18 +99,21 @@ def _household(
         age=50,
         role="HEAD",
     )
-    worker = _member(
-        f"{household_id}-worker",
-        gender="Male",
-        age=eligible_member_age,
-    )
+    if eligible_members is None:
+        eligible_members = [
+            _member(
+                f"{household_id}-worker",
+                gender="Male",
+                age=eligible_member_age,
+            )
+        ]
     return EligibleHousehold(
         id=household_id,
         code=str(household_id),
         wealth_quintile=wealth_quintile,
         last_verified_date=last_verified_date,
         head=head,
-        eligible_members=[worker],
+        eligible_members=eligible_members,
     )
 
 
@@ -200,6 +204,45 @@ class HouseholdSelectionTest(TestCase):
         result = select_households(households)
 
         self.assertEqual([row.household.id for row in result.main], ["worker"])
+
+    def test_select_households_backfills_quota_shortage_from_other_categories(self):
+        households = [
+            _household("female", "Poorest", head_gender="Female"),
+            _household("other-1", "Poorer"),
+            _household("other-2", "Middle"),
+        ]
+
+        result = select_households(households, target_count=3, reserve_percentage=0)
+
+        self.assertEqual(len(result.main), 3)
+        self.assertEqual(
+            [row.household.id for row in result.main],
+            ["female", "other-1", "other-2"],
+        )
+
+    def test_selection_result_expands_selected_households_to_member_rows(self):
+        households = [
+            _household(
+                "household",
+                "Poorest",
+                eligible_members=[
+                    _member("worker-1", age=24),
+                    _member("worker-2", age=45),
+                ],
+            )
+        ]
+
+        result = select_households(households)
+
+        self.assertEqual(len(result.member_rows), 2)
+        self.assertEqual(
+            [row.member.id for row in result.member_rows],
+            ["worker-1", "worker-2"],
+        )
+        self.assertEqual(
+            {row.household.id for row in result.member_rows},
+            {"household"},
+        )
 
     def test_is_truthy_accepts_ubr_boolean_shapes(self):
         for value in (True, 1, "1", "true", "TRUE", "yes", "Y"):

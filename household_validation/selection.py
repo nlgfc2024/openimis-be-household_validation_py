@@ -59,6 +59,14 @@ class SelectedHousehold:
 
 
 @dataclass(frozen=True)
+class SelectedMember:
+    household: EligibleHousehold
+    member: EligibleMember
+    category: str
+    row_type: str
+
+
+@dataclass(frozen=True)
 class SelectionResult:
     main: list[SelectedHousehold]
     reserve: list[SelectedHousehold]
@@ -66,6 +74,19 @@ class SelectionResult:
     @property
     def selected(self) -> list[SelectedHousehold]:
         return [*self.main, *self.reserve]
+
+    @property
+    def member_rows(self) -> list[SelectedMember]:
+        return [
+            SelectedMember(
+                household=selected.household,
+                member=member,
+                category=selected.category,
+                row_type=selected.row_type,
+            )
+            for selected in self.selected
+            for member in selected.household.eligible_members
+        ]
 
 
 def is_truthy(value):

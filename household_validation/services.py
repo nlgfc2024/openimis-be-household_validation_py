@@ -19,8 +19,11 @@ class EligibleHouseholdSelectionService:
     def select(
         self,
         district_id=None,
+        district_code=None,
         ta_id=None,
+        ta_code=None,
         village_id=None,
+        village_code=None,
         exclude_verified_after=None,
         target_count=None,
         reserve_percentage=10,
@@ -29,8 +32,11 @@ class EligibleHouseholdSelectionService:
         queryset = self._apply_location_filters(
             queryset,
             district_id=district_id,
+            district_code=district_code,
             ta_id=ta_id,
+            ta_code=ta_code,
             village_id=village_id,
+            village_code=village_code,
         )
         candidates = [
             household
@@ -56,20 +62,46 @@ class EligibleHouseholdSelectionService:
         self,
         queryset,
         district_id=None,
+        district_code=None,
         ta_id=None,
+        ta_code=None,
         village_id=None,
+        village_code=None,
     ):
-        if village_id:
-            return queryset.filter(location_id=village_id)
-        if ta_id:
+        if village_id or village_code:
+            village_filter = Q()
+            if village_id:
+                village_filter |= Q(location_id=village_id)
+            if village_code:
+                village_filter |= Q(location__code=village_code)
+            return queryset.filter(village_filter)
+
+        if ta_id or ta_code:
+            ta_filter = Q()
+            if ta_id:
+                ta_filter |= Q(location_id=ta_id) | Q(location__parent_id=ta_id)
+            if ta_code:
+                ta_filter |= Q(location__code=ta_code) | Q(location__parent__code=ta_code)
             return queryset.filter(
-                Q(location_id=ta_id) | Q(location__parent_id=ta_id)
+                ta_filter
             )
-        if district_id:
+
+        if district_id or district_code:
+            district_filter = Q()
+            if district_id:
+                district_filter |= (
+                    Q(location_id=district_id)
+                    | Q(location__parent_id=district_id)
+                    | Q(location__parent__parent_id=district_id)
+                )
+            if district_code:
+                district_filter |= (
+                    Q(location__code=district_code)
+                    | Q(location__parent__code=district_code)
+                    | Q(location__parent__parent__code=district_code)
+                )
             return queryset.filter(
-                Q(location_id=district_id)
-                | Q(location__parent_id=district_id)
-                | Q(location__parent__parent_id=district_id)
+                district_filter
             )
         return queryset
 
