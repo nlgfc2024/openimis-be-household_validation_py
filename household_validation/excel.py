@@ -33,6 +33,9 @@ EXCEL_COLUMNS = [
     "validation_notes",
 ]
 
+PROJECT_OPTIONS_SHEET = "Project Options"
+PROJECT_OPTIONS_HEADERS = ["project_id", "project"]
+
 EDITABLE_COLUMNS = {
     "participant",
     "verified",
@@ -55,9 +58,11 @@ class ExcelValidationListExporter:
 
         self._write_header(worksheet)
         self._write_rows(worksheet)
+        project_options_worksheet = self._write_project_options(workbook)
         self._apply_validation(worksheet)
         self._apply_protection(worksheet)
         self._autosize_columns(worksheet)
+        self._autosize_columns(project_options_worksheet)
 
         project_id_column = EXCEL_COLUMNS.index("project_id") + 1
         worksheet.column_dimensions[worksheet.cell(1, project_id_column).column_letter].hidden = True
@@ -89,6 +94,16 @@ class ExcelValidationListExporter:
                     value=values.get(title),
                 )
                 cell.protection = Protection(locked=title not in EDITABLE_COLUMNS)
+
+    def _write_project_options(self, workbook):
+        worksheet = workbook.create_sheet(PROJECT_OPTIONS_SHEET)
+        for column_number, title in enumerate(PROJECT_OPTIONS_HEADERS, start=1):
+            worksheet.cell(row=1, column=column_number, value=title)
+        for row_number, project in enumerate(self.projects, start=2):
+            worksheet.cell(row=row_number, column=1, value=self._project_id(project))
+            worksheet.cell(row=row_number, column=2, value=self._project_name(project))
+        worksheet.sheet_state = "hidden"
+        return worksheet
 
     def _build_row(self, selected_member):
         household = selected_member.household
@@ -144,10 +159,9 @@ class ExcelValidationListExporter:
         participant_validation.add(f"{participant_col}2:{participant_col}{max_row}")
         verified_validation.add(f"{verified_col}2:{verified_col}{max_row}")
 
-        project_names = [self._project_name(project) for project in self.projects]
-        project_names = [name for name in project_names if name]
-        if project_names:
-            project_formula = '"' + ",".join(project_names) + '"'
+        project_count = len([project for project in self.projects if self._project_name(project)])
+        if project_count:
+            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$B$2:$B${project_count + 1}"
             project_validation = DataValidation(
                 type="list",
                 formula1=project_formula,
@@ -193,3 +207,6 @@ class ExcelValidationListExporter:
 
     def _project_name(self, project):
         return getattr(project, "name", None)
+
+    def _project_id(self, project):
+        return str(getattr(project, "id", "") or getattr(project, "uuid", "") or "")

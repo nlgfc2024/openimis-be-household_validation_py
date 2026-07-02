@@ -13,7 +13,11 @@ from household_validation.apps import (
     RIGHT_HOUSEHOLD_VALIDATION_QUERY_EXPORT,
     RIGHT_HOUSEHOLD_VALIDATION_UPLOAD,
 )
-from household_validation.excel import EXCEL_COLUMNS, ExcelValidationListExporter
+from household_validation.excel import (
+    EXCEL_COLUMNS,
+    PROJECT_OPTIONS_SHEET,
+    ExcelValidationListExporter,
+)
 from household_validation.selection import (
     CATEGORY_FEMALE_HEADED,
     CATEGORY_OTHER,
@@ -281,7 +285,7 @@ class ExcelValidationListExporterTest(TestCase):
 
     def test_export_workbook_has_hidden_project_id_and_dropdowns(self):
         result = self._selection_result()
-        projects = [SimpleNamespace(name="Road Works")]
+        projects = [SimpleNamespace(id="project-1", name="Road Works, Phase 1")]
 
         workbook = ExcelValidationListExporter(
             result,
@@ -289,12 +293,16 @@ class ExcelValidationListExporterTest(TestCase):
             projects=projects,
         ).export_workbook()
         worksheet = workbook["Validation List"]
+        project_options = workbook[PROJECT_OPTIONS_SHEET]
         project_id_letter = worksheet.cell(1, EXCEL_COLUMNS.index("project_id") + 1).column_letter
 
         self.assertTrue(worksheet.column_dimensions[project_id_letter].hidden)
+        self.assertEqual(project_options.sheet_state, "hidden")
+        self.assertEqual(project_options["A2"].value, "project-1")
+        self.assertEqual(project_options["B2"].value, "Road Works, Phase 1")
         formulas = {validation.formula1 for validation in worksheet.data_validations.dataValidation}
         self.assertIn('"YES,NO"', formulas)
-        self.assertIn('"Road Works"', formulas)
+        self.assertIn("'Project Options'!$B$2:$B$2", formulas)
 
     def test_export_workbook_locks_structural_cells_and_unlocks_field_inputs(self):
         workbook = ExcelValidationListExporter(
