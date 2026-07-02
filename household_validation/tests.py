@@ -1,4 +1,5 @@
 from datetime import date
+from types import SimpleNamespace
 from unittest import TestCase
 
 from household_validation.apps import (
@@ -12,6 +13,7 @@ from household_validation.apps import (
     RIGHT_HOUSEHOLD_VALIDATION_QUERY_EXPORT,
     RIGHT_HOUSEHOLD_VALIDATION_UPLOAD,
 )
+from household_validation.excel import EXCEL_COLUMNS, ExcelValidationListExporter
 from household_validation.selection import (
     CATEGORY_FEMALE_HEADED,
     CATEGORY_OTHER,
@@ -20,6 +22,8 @@ from household_validation.selection import (
     ROW_TYPE_RESERVE,
     EligibleHousehold,
     EligibleMember,
+    SelectedHousehold,
+    SelectionResult,
     is_truthy,
     select_households,
 )
@@ -249,3 +253,113 @@ class HouseholdSelectionTest(TestCase):
             self.assertTrue(is_truthy(value))
         for value in (False, 0, "0", "false", "no", None, ""):
             self.assertFalse(is_truthy(value))
+
+
+class ExcelValidationListExporterTest(TestCase):
+    def test_export_workbook_writes_headers_and_member_rows(self):
+        result = self._selection_result()
+
+        workbook = ExcelValidationListExporter(result, batch_id="batch-1").export_workbook()
+        worksheet = workbook["Validation List"]
+
+        self.assertEqual(
+            [worksheet.cell(row=1, column=index).value for index in range(1, len(EXCEL_COLUMNS) + 1)],
+            EXCEL_COLUMNS,
+        )
+        self.assertEqual(worksheet["A2"].value, "batch-1")
+        self.assertEqual(worksheet["B2"].value, ROW_TYPE_MAIN)
+        self.assertEqual(worksheet["C2"].value, "District")
+        self.assertEqual(worksheet["D2"].value, "Traditional Authority")
+        self.assertEqual(worksheet["E2"].value, "Village")
+        self.assertEqual(worksheet["F2"].value, "HH-001")
+        self.assertEqual(worksheet["G2"].value, "group-1")
+        self.assertEqual(worksheet["H2"].value, "member-1")
+        self.assertEqual(worksheet["I2"].value, "Ada Worker")
+        self.assertEqual(worksheet["M2"].value, "YES")
+        self.assertEqual(worksheet["N2"].value, "YES")
+        self.assertEqual(worksheet["O2"].value, "PRIMARY")
+
+    def test_export_workbook_has_hidden_project_id_and_dropdowns(self):
+        result = self._selection_result()
+        projects = [SimpleNamespace(name="Road Works")]
+
+        workbook = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+            projects=projects,
+        ).export_workbook()
+        worksheet = workbook["Validation List"]
+        project_id_letter = worksheet.cell(1, EXCEL_COLUMNS.index("project_id") + 1).column_letter
+
+        self.assertTrue(worksheet.column_dimensions[project_id_letter].hidden)
+        formulas = {validation.formula1 for validation in worksheet.data_validations.dataValidation}
+        self.assertIn('"YES,NO"', formulas)
+        self.assertIn('"Road Works"', formulas)
+
+    def test_export_workbook_locks_structural_cells_and_unlocks_field_inputs(self):
+        workbook = ExcelValidationListExporter(
+            self._selection_result(),
+            batch_id="batch-1",
+        ).export_workbook()
+        worksheet = workbook["Validation List"]
+
+        self.assertTrue(worksheet.protection.sheet)
+        self.assertTrue(worksheet["G2"].protection.locked)
+        self.assertFalse(worksheet["P2"].protection.locked)
+        self.assertFalse(worksheet["Q2"].protection.locked)
+        self.assertFalse(worksheet["U2"].protection.locked)
+
+    def test_export_workbook_writes_one_row_per_selected_eligible_member(self):
+        result = self._selection_result(member_count=2)
+
+        workbook = ExcelValidationListExporter(result, batch_id="batch-1").export_workbook()
+        worksheet = workbook["Validation List"]
+
+        self.assertEqual(worksheet.max_row, 3)
+        self.assertEqual(worksheet["H2"].value, "member-1")
+        self.assertEqual(worksheet["H3"].value, "member-2")
+
+    def _selection_result(self, member_count=1):
+        location = self._location_tree()
+        group = SimpleNamespace(id="group-1", code="HH-001", location=location)
+        selected_members = []
+        for index in range(1, member_count + 1):
+            individual = SimpleNamespace(
+                first_name="Ada" if index == 1 else "Grace",
+                last_name="Worker",
+            )
+            group_individual = SimpleNamespace(individual=individual)
+            selected_members.append(
+                EligibleMember(
+                    id=f"member-{index}",
+                    gender="Female",
+                    dob=date(1990, 1, index),
+                    fit_for_work=True,
+                    role="HEAD" if index == 1 else None,
+                    recipient_type="PRIMARY" if index == 1 else None,
+                    source=group_individual,
+                )
+            )
+        household = EligibleHousehold(
+            id="group-1",
+            code="HH-001",
+            wealth_quintile="Poorest",
+            head=selected_members[0],
+            eligible_members=selected_members,
+            source=group,
+        )
+        return SelectionResult(
+            main=[
+                SelectedHousehold(
+                    household=household,
+                    category=CATEGORY_FEMALE_HEADED,
+                    row_type=ROW_TYPE_MAIN,
+                )
+            ],
+            reserve=[],
+        )
+
+    def _location_tree(self):
+        district = SimpleNamespace(type="D", name="District", code="D01", parent=None)
+        ta = SimpleNamespace(type="W", name="Traditional Authority", code="TA01", parent=district)
+        return SimpleNamespace(type="V", name="Village", code="V01", parent=ta)
