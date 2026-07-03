@@ -1,8 +1,8 @@
 import graphene
 from django.core.exceptions import PermissionDenied
-from django.utils.translation import gettext as _
 
 from household_validation.apps import HouseholdValidationConfig
+from household_validation.gql_permissions import require_permissions
 from household_validation.gql_mutations import (
     GenerateHouseholdValidationListMutation,
     UploadHouseholdValidationListMutation,
@@ -88,8 +88,7 @@ class Query(graphene.ObjectType):
 
     @staticmethod
     def _check_permissions(user, perms):
-        if not user or not user.has_perms(perms):
-            raise PermissionDenied(_("unauthorized"))
+        require_permissions(user, perms, error_class=PermissionDenied)
 
 
 class Mutation(graphene.ObjectType):

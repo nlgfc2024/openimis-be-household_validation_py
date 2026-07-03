@@ -1,13 +1,12 @@
 import base64
 
 import graphene
-from django.contrib.auth.models import AnonymousUser
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.utils import timezone
-from django.utils.translation import gettext as _
 
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.excel import ExcelValidationListExporter
+from household_validation.gql_permissions import require_permissions
 from household_validation.models import HouseholdValidationBatch
 from household_validation.services import (
     EligibleHouseholdSelectionService,
@@ -126,8 +125,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
 
     @staticmethod
     def _validate_user(user, perms):
-        if type(user) is AnonymousUser or not user.id or not user.has_perms(perms):
-            raise PermissionDenied(_("unauthorized"))
+        require_permissions(user, perms, error_class=PermissionDenied)
 
 
 class UploadHouseholdValidationListMutation(graphene.Mutation):

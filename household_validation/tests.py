@@ -21,6 +21,10 @@ from household_validation.excel import (
     PROJECT_OPTIONS_SHEET,
     ExcelValidationListExporter,
 )
+from household_validation.gql_permissions import (
+    HouseholdValidationPermissionError,
+    require_permissions,
+)
 from household_validation.project_lookup import (
     ACTIVE_PROJECT_STATUSES,
     ProjectOption,
@@ -190,6 +194,18 @@ class HouseholdSelectionTest(TestCase):
         self.assertEqual(result.reserve[0].row_type, ROW_TYPE_RESERVE)
         self.assertEqual(result.reserve[0].household.id, "other")
 
+    def test_select_households_adds_default_ten_percent_reserve(self):
+        households = [
+            _household(index, "Poorest")
+            for index in range(1, 12)
+        ]
+
+        result = select_households(households, target_count=10)
+
+        self.assertEqual(len(result.main), 10)
+        self.assertEqual(len(result.reserve), 1)
+        self.assertEqual(result.reserve[0].row_type, ROW_TYPE_RESERVE)
+
     def test_select_households_excludes_recently_verified_households(self):
         households = [
             _household(
@@ -265,6 +281,23 @@ class HouseholdSelectionTest(TestCase):
             {"household"},
         )
 
+    def test_select_households_treats_ages_18_to_35_as_youth(self):
+        households = [
+            _household("age-18", "Poorest", eligible_member_age=18),
+            _household("age-35", "Poorest", eligible_member_age=35),
+            _household("age-36", "Poorest", eligible_member_age=36),
+        ]
+
+        result = select_households(households, target_count=3, reserve_percentage=0)
+
+        categories = {
+            row.household.id: row.category
+            for row in result.main
+        }
+        self.assertEqual(categories["age-18"], CATEGORY_YOUTH)
+        self.assertEqual(categories["age-35"], CATEGORY_YOUTH)
+        self.assertEqual(categories["age-36"], CATEGORY_OTHER)
+
     def test_is_truthy_accepts_ubr_boolean_shapes(self):
         for value in (True, 1, "1", "true", "TRUE", "yes", "Y"):
             self.assertTrue(is_truthy(value))
@@ -303,6 +336,39 @@ class ProjectLookupTest(TestCase):
         )
 
         self.assertEqual(project_option_from_project(project).location_id, "21")
+
+
+class GraphQLPermissionTest(TestCase):
+    def test_require_permissions_allows_user_with_required_rights(self):
+        user = SimpleNamespace(
+            id="user-1",
+            is_anonymous=False,
+            has_perms=lambda perms: perms == ["958001"],
+        )
+
+        self.assertIsNone(require_permissions(user, ["958001"]))
+
+    def test_require_permissions_rejects_missing_rights(self):
+        user = SimpleNamespace(
+            id="user-1",
+            is_anonymous=False,
+            has_perms=lambda perms: False,
+        )
+
+        with self.assertRaises(HouseholdValidationPermissionError):
+            require_permissions(user, ["958002"])
+
+    def test_require_permissions_rejects_anonymous_or_missing_user(self):
+        anonymous_user = SimpleNamespace(
+            id=None,
+            is_anonymous=True,
+            has_perms=lambda perms: True,
+        )
+
+        with self.assertRaises(HouseholdValidationPermissionError):
+            require_permissions(anonymous_user, ["958001"])
+        with self.assertRaises(HouseholdValidationPermissionError):
+            require_permissions(None, ["958001"])
 
 
 class ValidationUploadParserTest(TestCase):
@@ -375,6 +441,19 @@ class ValidationUploadParserTest(TestCase):
 
         self.assertEqual(parsed.rows, [])
         self.assertIn("Row 2: project_id cannot be set without project", parsed.errors)
+
+    def test_parse_validation_workbook_rejects_hidden_project_id_mismatch(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        project_column = EXCEL_COLUMNS.index("project") + 1
+        project_id_column = EXCEL_COLUMNS.index("project_id") + 1
+        worksheet.cell(row=2, column=project_column, value="Road Works")
+        worksheet.cell(row=2, column=project_id_column, value="different-project")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.rows, [])
+        self.assertIn("Row 2: project is not in the project options", parsed.errors)
 
     def _upload_workbook(self):
         workbook = Workbook()
