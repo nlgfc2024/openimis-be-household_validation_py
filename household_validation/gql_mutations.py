@@ -1,0 +1,157 @@
+import base64
+
+import graphene
+from django.contrib.auth.models import AnonymousUser
+from django.core.exceptions import PermissionDenied, ValidationError
+from django.utils import timezone
+from django.utils.translation import gettext as _
+
+from household_validation.apps import HouseholdValidationConfig
+from household_validation.excel import ExcelValidationListExporter
+from household_validation.models import HouseholdValidationBatch
+from household_validation.services import (
+    EligibleHouseholdSelectionService,
+    HouseholdValidationProjectLookupService,
+    HouseholdValidationUploadService,
+)
+
+
+class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    households_selected = graphene.Int()
+    reserve_households = graphene.Int()
+    member_rows = graphene.Int()
+
+
+class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
+    rows_read = graphene.Int()
+    households_verified = graphene.Int()
+    households_not_verified = graphene.Int()
+    participant_updates = graphene.Int()
+    errors = graphene.Int()
+    error_messages = graphene.List(graphene.String)
+
+
+class GenerateHouseholdValidationListMutation(graphene.Mutation):
+    Output = HouseholdValidationGenerateResultGQLType
+
+    class Arguments:
+        district_id = graphene.Int(required=False)
+        district_code = graphene.String(required=False)
+        ta_id = graphene.Int(required=False)
+        ta_code = graphene.String(required=False)
+        village_id = graphene.Int(required=False)
+        village_code = graphene.String(required=False)
+        hotspot_id = graphene.String(required=False)
+        hotspot_code = graphene.String(required=False)
+        catchment_id = graphene.String(required=False)
+        catchment_code = graphene.String(required=False)
+        exclude_verified_after = graphene.Date(required=False)
+        target_count = graphene.Int(required=False)
+        reserve_percentage = graphene.Int(required=False)
+
+    @classmethod
+    def mutate(cls, root, info, **data):
+        cls._validate_user(
+            info.context.user,
+            HouseholdValidationConfig.gql_mutation_generate_household_validation_list_perms,
+        )
+        reserve_percentage = data.get("reserve_percentage")
+        if reserve_percentage is None:
+            reserve_percentage = 10
+
+        selection_result = EligibleHouseholdSelectionService(info.context.user).select(
+            district_id=data.get("district_id"),
+            district_code=data.get("district_code"),
+            ta_id=data.get("ta_id"),
+            ta_code=data.get("ta_code"),
+            village_id=data.get("village_id"),
+            village_code=data.get("village_code"),
+            exclude_verified_after=data.get("exclude_verified_after"),
+            target_count=data.get("target_count"),
+            reserve_percentage=reserve_percentage,
+        )
+        projects = HouseholdValidationProjectLookupService().list_projects(
+            location_id=(
+                data.get("village_id")
+                or data.get("ta_id")
+                or data.get("district_id")
+            ),
+            location_code=(
+                data.get("village_code")
+                or data.get("ta_code")
+                or data.get("district_code")
+            ),
+            hotspot_id=data.get("hotspot_id"),
+            hotspot_code=data.get("hotspot_code"),
+            catchment_id=data.get("catchment_id"),
+        )
+        batch = HouseholdValidationBatch(
+            district_id=data.get("district_id"),
+            ta_id=data.get("ta_id"),
+            village_id=data.get("village_id"),
+            hotspot_code=data.get("hotspot_code"),
+            catchment_code=data.get("catchment_code"),
+            exclude_verified_after=data.get("exclude_verified_after"),
+            target_count=data.get("target_count"),
+            generated_at=timezone.now(),
+            status=HouseholdValidationBatch.Status.PENDING,
+            json_ext={
+                "hotspot_id": data.get("hotspot_id"),
+                "catchment_id": data.get("catchment_id"),
+                "reserve_percentage": reserve_percentage,
+                "households_selected": len(selection_result.main),
+                "reserve_households": len(selection_result.reserve),
+                "member_rows": len(selection_result.member_rows),
+            },
+        )
+        batch.save(user=info.context.user)
+
+        workbook_bytes = ExcelValidationListExporter(
+            selection_result,
+            batch_id=batch.id,
+            projects=projects,
+        ).export_bytes()
+        file_name = f"household_validation_{batch.id}.xlsx"
+        return HouseholdValidationGenerateResultGQLType(
+            batch_id=batch.id,
+            file_name=file_name,
+            file_base64=base64.b64encode(workbook_bytes).decode("ascii"),
+            households_selected=len(selection_result.main),
+            reserve_households=len(selection_result.reserve),
+            member_rows=len(selection_result.member_rows),
+        )
+
+    @staticmethod
+    def _validate_user(user, perms):
+        if type(user) is AnonymousUser or not user.id or not user.has_perms(perms):
+            raise PermissionDenied(_("unauthorized"))
+
+
+class UploadHouseholdValidationListMutation(graphene.Mutation):
+    Output = HouseholdValidationUploadResultGQLType
+
+    class Arguments:
+        file_base64 = graphene.String(required=True)
+        dry_run = graphene.Boolean(required=False)
+        source_file_name = graphene.String(required=False)
+
+    @classmethod
+    def mutate(cls, root, info, **data):
+        GenerateHouseholdValidationListMutation._validate_user(
+            info.context.user,
+            HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+        )
+        try:
+            workbook_bytes = base64.b64decode(data["file_base64"], validate=True)
+        except Exception as exc:
+            raise ValidationError("household_validation.upload.invalid_base64") from exc
+
+        totals = HouseholdValidationUploadService(info.context.user).upload(
+            workbook_bytes,
+            dry_run=data.get("dry_run") or False,
+            source_file_name=data.get("source_file_name"),
+        )
+        return HouseholdValidationUploadResultGQLType(**totals)
