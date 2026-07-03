@@ -35,7 +35,7 @@ The module defines these household validation rights:
 - `958003`: query validation upload history
 - `958004`: download validation upload error reports
 
-The initial rights migration assigns these rights to the IMIS Administrator system role (`is_system = 64`) when that role exists. District Administrator, District Program Manager, and District User role assignment should be added through deployment fixtures or administration once those roles exist in the target environment.
+The initial rights migration assigns these rights to the IMIS Administrator system role (`is_system = 64`) when that role exists. The district validation role migration creates or reuses the active `District Administrator`, `District Program Manager`, and `District User` roles as non-system deployment roles and assigns them household validation rights plus group search/update rights.
 
 The module configuration exposes these GraphQL permission keys:
 

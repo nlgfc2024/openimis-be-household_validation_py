@@ -7,8 +7,13 @@ from openpyxl import Workbook
 
 from household_validation.apps import (
     DEFAULT_CONFIG,
+    DISTRICT_VALIDATION_ROLE_RIGHTS,
+    DISTRICT_VALIDATION_ROLES,
     GROUP_RIGHTS,
     HOUSEHOLD_VALIDATION_RIGHTS,
+    ROLE_DISTRICT_ADMINISTRATOR,
+    ROLE_DISTRICT_PROGRAM_MANAGER,
+    ROLE_DISTRICT_USER,
     RIGHT_GROUP_SEARCH,
     RIGHT_GROUP_UPDATE,
     RIGHT_HOUSEHOLD_VALIDATION_ERROR_REPORT,
@@ -93,6 +98,22 @@ class HouseholdValidationConfigTest(TestCase):
         )
         self.assertIn(RIGHT_GROUP_SEARCH, GROUP_RIGHTS)
         self.assertIn(RIGHT_GROUP_UPDATE, GROUP_RIGHTS)
+
+    def test_district_validation_roles_have_validation_and_group_update_rights(self):
+        self.assertEqual(
+            DISTRICT_VALIDATION_ROLES,
+            [
+                ROLE_DISTRICT_ADMINISTRATOR,
+                ROLE_DISTRICT_PROGRAM_MANAGER,
+                ROLE_DISTRICT_USER,
+            ],
+        )
+        for role_name in DISTRICT_VALIDATION_ROLES:
+            role_rights = DISTRICT_VALIDATION_ROLE_RIGHTS[role_name]
+            for right in HOUSEHOLD_VALIDATION_RIGHTS:
+                self.assertIn(right, role_rights)
+            self.assertIn(RIGHT_GROUP_SEARCH, role_rights)
+            self.assertIn(RIGHT_GROUP_UPDATE, role_rights)
 
 
 def _dob_for_age(age):
