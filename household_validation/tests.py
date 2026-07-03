@@ -1,6 +1,9 @@
 from datetime import date
+from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
+
+from openpyxl import Workbook
 
 from household_validation.apps import (
     DEFAULT_CONFIG,
@@ -35,6 +38,11 @@ from household_validation.selection import (
     SelectionResult,
     is_truthy,
     select_households,
+)
+from household_validation.upload import (
+    PROJECT_SELECTION_TYPE_INTENT,
+    VALIDATION_LIST_SHEET,
+    parse_validation_workbook,
 )
 
 
@@ -295,6 +303,105 @@ class ProjectLookupTest(TestCase):
         )
 
         self.assertEqual(project_option_from_project(project).location_id, "21")
+
+
+class ValidationUploadParserTest(TestCase):
+    def test_parse_validation_workbook_resolves_project_name_to_hidden_project_id(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        project_column = EXCEL_COLUMNS.index("project") + 1
+        verified_column = EXCEL_COLUMNS.index("verified") + 1
+        participant_column = EXCEL_COLUMNS.index("participant") + 1
+        worksheet.cell(row=2, column=project_column, value="Road Works")
+        worksheet.cell(row=2, column=verified_column, value="YES")
+        worksheet.cell(row=2, column=participant_column, value="YES")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows_read, 1)
+        self.assertEqual(parsed.rows[0].project_id, "project-1")
+        self.assertEqual(parsed.rows[0].verified, True)
+        self.assertEqual(parsed.rows[0].participant, True)
+        self.assertEqual(PROJECT_SELECTION_TYPE_INTENT, "INTENT")
+
+    def test_parse_validation_workbook_reports_missing_required_columns(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = VALIDATION_LIST_SHEET
+        worksheet.append(["batch_id", "group_uuid"])
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.rows, [])
+        self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
+        self.assertIn("member_uuid", parsed.errors[0])
+
+    def test_parse_validation_workbook_rejects_invalid_editable_values(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        verified_column = EXCEL_COLUMNS.index("verified") + 1
+        participant_column = EXCEL_COLUMNS.index("participant") + 1
+        date_column = EXCEL_COLUMNS.index("validation_date") + 1
+        worksheet.cell(row=2, column=verified_column, value="MAYBE")
+        worksheet.cell(row=2, column=participant_column, value="LATER")
+        worksheet.cell(row=2, column=date_column, value="not-a-date")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.rows, [])
+        self.assertIn("Row 2: verified must be YES or NO", parsed.errors)
+        self.assertIn("Row 2: participant must be YES or NO", parsed.errors)
+        self.assertIn("Row 2: validation_date is invalid", parsed.errors)
+
+    def test_parse_validation_workbook_rejects_unknown_project_names(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        project_column = EXCEL_COLUMNS.index("project") + 1
+        worksheet.cell(row=2, column=project_column, value="Unknown Project")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.rows, [])
+        self.assertIn("Row 2: project is not in the project options", parsed.errors)
+
+    def test_parse_validation_workbook_rejects_hidden_project_id_without_project(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        project_id_column = EXCEL_COLUMNS.index("project_id") + 1
+        worksheet.cell(row=2, column=project_id_column, value="project-1")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.rows, [])
+        self.assertIn("Row 2: project_id cannot be set without project", parsed.errors)
+
+    def _upload_workbook(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = VALIDATION_LIST_SHEET
+        worksheet.append(EXCEL_COLUMNS)
+        values = {column: None for column in EXCEL_COLUMNS}
+        values.update(
+            {
+                "batch_id": "batch-1",
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+                "district": "District",
+                "TA": "Traditional Authority",
+                "village": "Village",
+            }
+        )
+        worksheet.append([values[column] for column in EXCEL_COLUMNS])
+        project_options = workbook.create_sheet(PROJECT_OPTIONS_SHEET)
+        project_options.append(["project_id", "project"])
+        project_options.append(["project-1", "Road Works"])
+        return workbook
+
+    def _workbook_bytes(self, workbook):
+        output = BytesIO()
+        workbook.save(output)
+        return output.getvalue()
 
 
 class ExcelValidationListExporterTest(TestCase):

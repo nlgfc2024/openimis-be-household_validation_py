@@ -1,10 +1,19 @@
 from datetime import date
+from uuid import UUID
 
+from django.core.exceptions import ValidationError
+from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from individual.models import Group, GroupIndividual
+from individual.services import GroupIndividualService
 from social_protection.models import Project
 
+from household_validation.models import (
+    HouseholdValidationBatch,
+    HouseholdValidationBatchRow,
+)
 from household_validation.project_lookup import (
     ACTIVE_PROJECT_STATUSES,
     project_option_from_project,
@@ -15,6 +24,268 @@ from household_validation.selection import (
     is_truthy,
     select_households,
 )
+from household_validation.upload import (
+    PROJECT_SELECTION_TYPE_INTENT,
+    parse_validation_workbook,
+)
+
+
+class HouseholdValidationUploadService:
+    def __init__(self, user=None):
+        self.user = user
+
+    def upload(self, file_or_bytes, dry_run=False, source_file_name=None):
+        parsed = parse_validation_workbook(file_or_bytes)
+        totals = {
+            "rows_read": parsed.rows_read,
+            "households_verified": 0,
+            "households_not_verified": 0,
+            "participant_updates": 0,
+            "errors": len(parsed.errors),
+            "error_messages": list(parsed.errors),
+        }
+        if dry_run:
+            return totals
+
+        batch = self._get_or_create_batch(parsed, source_file_name=source_file_name)
+        upload_date = timezone.localdate()
+        uploaded_at = timezone.now()
+
+        with transaction.atomic():
+            for uploaded_row in parsed.rows:
+                row_errors = self._apply_row(
+                    uploaded_row,
+                    batch=batch,
+                    upload_date=upload_date,
+                    uploaded_at=uploaded_at,
+                )
+                if row_errors:
+                    totals["errors"] += len(row_errors)
+                    totals["error_messages"].extend(row_errors)
+                    continue
+                if uploaded_row.verified is True:
+                    totals["households_verified"] += 1
+                else:
+                    totals["households_not_verified"] += 1
+                if uploaded_row.participant:
+                    totals["participant_updates"] += 1
+
+            batch.uploaded_at = uploaded_at
+            batch.status = self._batch_status(totals)
+            batch.error_summary = "\n".join(totals["error_messages"]) or None
+            batch.save(user=self.user)
+        return totals
+
+    def _get_or_create_batch(self, parsed, source_file_name=None):
+        batch_id = self._batch_id(parsed)
+        if batch_id:
+            batch = HouseholdValidationBatch.objects.filter(id=batch_id).first()
+            if batch:
+                return batch
+        batch = HouseholdValidationBatch(
+            source_file_name=source_file_name,
+            status=HouseholdValidationBatch.Status.PENDING,
+        )
+        if batch_id:
+            batch.id = batch_id
+        batch.save(user=self.user)
+        return batch
+
+    def _batch_id(self, parsed):
+        batch_ids = {
+            row.values.get("batch_id")
+            for row in parsed.rows
+            if row.values.get("batch_id")
+        }
+        if len(batch_ids) != 1:
+            return None
+        batch_id = next(iter(batch_ids))
+        try:
+            return UUID(str(batch_id))
+        except ValueError:
+            return None
+
+    def _apply_row(self, uploaded_row, batch, upload_date, uploaded_at):
+        errors = []
+        group = self._group(uploaded_row.values["group_uuid"])
+        group_individual = self._group_individual(
+            uploaded_row.values["member_uuid"],
+            group=group,
+        )
+        project = self._project(uploaded_row.project_id)
+
+        if group is None:
+            errors.append(f"Row {uploaded_row.row_number}: group was not found")
+        else:
+            errors.extend(self._structural_errors(uploaded_row, group))
+        if group_individual is None:
+            errors.append(f"Row {uploaded_row.row_number}: member was not found in group")
+        if uploaded_row.project_id and project is None:
+            errors.append(f"Row {uploaded_row.row_number}: project was not found")
+
+        if errors:
+            self._save_batch_row(
+                batch=batch,
+                uploaded_row=uploaded_row,
+                group=group,
+                group_individual=group_individual,
+                project=project,
+                status=HouseholdValidationBatchRow.Status.ERROR,
+                error_message="\n".join(errors),
+            )
+            return errors
+
+        if uploaded_row.verified is True:
+            self._apply_group_validation(
+                group=group,
+                uploaded_row=uploaded_row,
+                project=project,
+                upload_date=upload_date,
+                uploaded_at=uploaded_at,
+            )
+        if uploaded_row.participant:
+            self._apply_participant(group_individual)
+
+        self._save_batch_row(
+            batch=batch,
+            uploaded_row=uploaded_row,
+            group=group,
+            group_individual=group_individual,
+            project=project,
+            status=(
+                HouseholdValidationBatchRow.Status.APPLIED
+                if uploaded_row.verified is True or uploaded_row.participant
+                else HouseholdValidationBatchRow.Status.SKIPPED
+            ),
+        )
+        return []
+
+    def _apply_group_validation(self, group, uploaded_row, project, upload_date, uploaded_at):
+        json_ext = group.json_ext or {}
+        validation_date = uploaded_row.validation_date or upload_date
+        json_ext.update(
+            {
+                "validation_status": "VERIFIED",
+                "last_verified_date": validation_date.isoformat(),
+                "validation_project_id": str(project.id) if project else uploaded_row.project_id,
+                "validation_project_name": project.name if project else uploaded_row.project_name,
+                "validation_project_selection_type": PROJECT_SELECTION_TYPE_INTENT,
+                "validation_uploaded_at": uploaded_at.isoformat(),
+                "validation_uploaded_by_id": str(getattr(self.user, "id", "")) or None,
+                "validation_notes": uploaded_row.notes,
+            }
+        )
+        group.json_ext = json_ext
+        group.save(user=self.user)
+
+    def _apply_participant(self, group_individual):
+        GroupIndividualService(self.user).update(
+            {
+                "id": group_individual.id,
+                "group_id": group_individual.group_id,
+                "individual_id": group_individual.individual_id,
+                "role": group_individual.role,
+                "recipient_type": GroupIndividual.RecipientType.PRIMARY,
+            }
+        )
+
+    def _save_batch_row(
+        self,
+        batch,
+        uploaded_row,
+        group=None,
+        group_individual=None,
+        project=None,
+        status=HouseholdValidationBatchRow.Status.PENDING,
+        error_message=None,
+    ):
+        batch_row = HouseholdValidationBatchRow(
+            batch=batch,
+            group=group,
+            group_individual=group_individual,
+            individual=getattr(group_individual, "individual", None),
+            project=project,
+            row_number=uploaded_row.row_number,
+            verified=uploaded_row.verified,
+            validation_date=uploaded_row.validation_date,
+            status=status,
+            error_message=error_message,
+            raw_row=uploaded_row.values,
+            json_ext={
+                "participant": uploaded_row.participant,
+                "project_name": uploaded_row.project_name,
+                "validation_notes": uploaded_row.notes,
+            },
+        )
+        batch_row.save(user=self.user)
+
+    def _project(self, project_id):
+        if not project_id:
+            return None
+        try:
+            return Project.objects.filter(id=project_id).first()
+        except (ValueError, ValidationError):
+            return None
+
+    def _group(self, group_id):
+        try:
+            return Group.objects.filter(id=group_id).select_related("location").first()
+        except (ValueError, ValidationError):
+            return None
+
+    def _group_individual(self, group_individual_id, group):
+        try:
+            return (
+                GroupIndividual.objects.filter(
+                    id=group_individual_id,
+                    group=group,
+                    is_deleted=False,
+                )
+                .select_related("individual")
+                .first()
+            )
+        except (ValueError, ValidationError):
+            return None
+
+    def _structural_errors(self, uploaded_row, group):
+        errors = []
+        row_number = uploaded_row.row_number
+        if self._normalize(uploaded_row.values.get("group_code")) != self._normalize(group.code):
+            errors.append(f"Row {row_number}: group_code does not match the household")
+
+        location = getattr(group, "location", None)
+        location_checks = (
+            ("district", "D"),
+            ("TA", "W"),
+            ("village", "V"),
+        )
+        for column, location_type in location_checks:
+            uploaded_value = self._normalize(uploaded_row.values.get(column))
+            database_value = self._normalize(self._location_name(location, location_type))
+            if uploaded_value and database_value and uploaded_value != database_value:
+                errors.append(f"Row {row_number}: {column} does not match the household")
+        return errors
+
+    def _location_name(self, location, location_type):
+        current = location
+        while current is not None:
+            if getattr(current, "type", None) == location_type:
+                return getattr(current, "name", None) or getattr(current, "code", None)
+            current = getattr(current, "parent", None)
+        return None
+
+    def _normalize(self, value):
+        if value is None:
+            return None
+        value = str(value).strip().casefold()
+        return value or None
+
+    def _batch_status(self, totals):
+        if totals["errors"] and totals["errors"] >= totals["rows_read"]:
+            return HouseholdValidationBatch.Status.FAILED
+        if totals["errors"]:
+            return HouseholdValidationBatch.Status.PARTIAL_SUCCESS
+        return HouseholdValidationBatch.Status.PROCESSED
 
 
 class HouseholdValidationProjectLookupService:
