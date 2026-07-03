@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
+import csv
 from datetime import date, datetime
 from io import BytesIO
+from io import StringIO
 
 from openpyxl import load_workbook
 
@@ -13,6 +15,8 @@ from household_validation.excel import (
 
 VALIDATION_LIST_SHEET = "Validation List"
 PROJECT_SELECTION_TYPE_INTENT = "INTENT"
+VALIDATION_STATUS_VERIFIED = "VERIFIED"
+VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 
 EDITABLE_UPLOAD_COLUMNS = {
     "participant",
@@ -79,13 +83,14 @@ def parse_validation_workbook(file_or_bytes):
         verified = _parse_yes_no(values.get("verified"))
         participant = _parse_yes_no(values.get("participant")) is True
         validation_date = _parse_date(values.get("validation_date"))
-        project_name = _clean(values.get("project"))
+        project_label = _clean(values.get("project"))
+        project_name = _resolve_project_name(project_label, project_options)
         project_id = _resolve_project_id(
-            project_name=project_name,
+            project_label=project_label,
             workbook_project_id=_clean(values.get("project_id")),
             project_options=project_options,
         )
-        if values.get("project_id") and not project_name:
+        if values.get("project_id") and not project_label:
             row_errors.append(f"Row {row_number}: project_id cannot be set without project")
         if values.get("verified") not in (None, "") and verified is None:
             row_errors.append(f"Row {row_number}: verified must be YES or NO")
@@ -93,7 +98,7 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(f"Row {row_number}: participant must be YES or NO")
         if values.get("validation_date") and validation_date is None:
             row_errors.append(f"Row {row_number}: validation_date is invalid")
-        if project_name and not project_id:
+        if project_label and not project_id:
             row_errors.append(f"Row {row_number}: project is not in the project options")
         if row_errors:
             errors.extend(row_errors)
@@ -138,14 +143,20 @@ def _read_project_options(workbook):
         return {}
     worksheet = workbook[PROJECT_OPTIONS_SHEET]
     headers = _read_headers(worksheet)
-    if not all(header in headers for header in PROJECT_OPTIONS_HEADERS):
+    if not all(header in headers for header in PROJECT_OPTIONS_HEADERS[:2]):
         return {}
     options = {}
     for row_number in range(2, worksheet.max_row + 1):
         project_id = _clean(worksheet.cell(row=row_number, column=headers["project_id"]).value)
         project_name = _clean(worksheet.cell(row=row_number, column=headers["project"]).value)
+        project_label = project_name
+        if "project_label" in headers:
+            project_label = _clean(worksheet.cell(row=row_number, column=headers["project_label"]).value)
         if project_id and project_name:
-            options[project_name] = project_id
+            options[project_label or project_name] = {
+                "id": project_id,
+                "name": project_name,
+            }
     return options
 
 
@@ -199,10 +210,135 @@ def _parse_date(value):
         return None
 
 
-def _resolve_project_id(project_name, workbook_project_id, project_options):
-    if not project_name:
+def _resolve_project_name(project_label, project_options):
+    if not project_label:
+        return None
+    option = project_options.get(project_label)
+    if isinstance(option, dict):
+        return option.get("name")
+    if option:
+        return project_label
+    return None
+
+
+def _resolve_project_id(project_label, workbook_project_id, project_options):
+    if not project_label:
         return workbook_project_id
-    project_id = project_options.get(project_name)
+    option = project_options.get(project_label)
+    project_id = option.get("id") if isinstance(option, dict) else option
     if workbook_project_id and project_id and workbook_project_id != project_id:
         return None
     return project_id or workbook_project_id
+
+
+def build_validation_json_ext(uploaded_row, project, upload_date, uploaded_at, user_id):
+    validation_date = uploaded_row.validation_date or upload_date
+    validation_status = (
+        VALIDATION_STATUS_VERIFIED
+        if uploaded_row.verified is True
+        else VALIDATION_STATUS_NOT_VERIFIED
+    )
+    return {
+        "validation_status": validation_status,
+        "last_verified_date": validation_date.isoformat(),
+        "validation_project_id": str(project.id) if project else uploaded_row.project_id,
+        "validation_project_name": project.name if project else uploaded_row.project_name,
+        "validation_project_selection_type": PROJECT_SELECTION_TYPE_INTENT,
+        "validation_uploaded_at": uploaded_at.isoformat(),
+        "validation_uploaded_by_id": str(user_id) if user_id else None,
+        "validation_notes": uploaded_row.notes,
+    }
+
+
+def member_structural_errors(uploaded_row, group_individual):
+    errors = []
+    row_number = uploaded_row.row_number
+    individual = getattr(group_individual, "individual", None)
+    individual_json_ext = getattr(individual, "json_ext", None) or {}
+
+    expected = {
+        "member_name": _member_name(individual),
+        "member_gender": individual_json_ext.get("gender"),
+        "member_dob": _date_value(getattr(individual, "dob", None)),
+        "member_age": _age(getattr(individual, "dob", None)),
+        "fit_for_work": "YES" if _truthy(individual_json_ext.get("fit_for_work")) else "NO",
+        "head": "YES" if str(getattr(group_individual, "role", "")).upper() == "HEAD" else "NO",
+        "current_recipient_type": getattr(group_individual, "recipient_type", None),
+    }
+    for column, expected_value in expected.items():
+        uploaded_value = uploaded_row.values.get(column)
+        if uploaded_value in (None, "") or expected_value in (None, ""):
+            continue
+        if _normalize(uploaded_value) != _normalize(expected_value):
+            errors.append(f"Row {row_number}: {column} does not match the household member")
+    return errors
+
+
+def build_validation_error_report_csv(batch_id, rows):
+    output = StringIO()
+    writer = csv.writer(output)
+    writer.writerow(
+        [
+            "batch_id",
+            "row_number",
+            "status",
+            "group_code",
+            "group_uuid",
+            "member_uuid",
+            "error_message",
+        ]
+    )
+    for row in rows:
+        raw_row = row.raw_row or {}
+        writer.writerow(
+            [
+                str(batch_id),
+                row.row_number,
+                row.status,
+                raw_row.get("group_code"),
+                raw_row.get("group_uuid"),
+                raw_row.get("member_uuid"),
+                row.error_message,
+            ]
+        )
+    return output.getvalue()
+
+
+def _member_name(individual):
+    if individual is None:
+        return None
+    return f"{getattr(individual, 'first_name', '') or ''} {getattr(individual, 'last_name', '') or ''}".strip()
+
+
+def _date_value(value):
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _age(dob):
+    if not isinstance(dob, date):
+        return None
+    today = date.today()
+    return today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+
+
+def _truthy(value):
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return bool(value)
+
+
+def _normalize(value):
+    if value is None:
+        return None
+    if isinstance(value, date):
+        value = value.isoformat()
+    value = str(value).strip().casefold()
+    return value or None

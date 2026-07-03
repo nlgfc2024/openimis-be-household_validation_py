@@ -55,3 +55,10 @@ class HouseholdValidationBatchesGQLType(graphene.ObjectType):
 class HouseholdValidationBatchRowsGQLType(graphene.ObjectType):
     rows = graphene.List(HouseholdValidationBatchRowGQLType)
     count = graphene.Int()
+
+
+class HouseholdValidationErrorReportGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    error_count = graphene.Int()

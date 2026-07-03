@@ -1,3 +1,5 @@
+import base64
+
 import graphene
 from django.core.exceptions import PermissionDenied
 
@@ -10,13 +12,17 @@ from household_validation.gql_mutations import (
 from household_validation.gql_queries import (
     HouseholdValidationBatchRowsGQLType,
     HouseholdValidationBatchesGQLType,
+    HouseholdValidationErrorReportGQLType,
     HouseholdValidationProjectsGQLType,
 )
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
 )
-from household_validation.services import HouseholdValidationProjectLookupService
+from household_validation.services import (
+    HouseholdValidationProjectLookupService,
+    build_validation_error_report,
+)
 
 
 class Query(graphene.ObjectType):
@@ -36,6 +42,10 @@ class Query(graphene.ObjectType):
         HouseholdValidationBatchRowsGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
         status=graphene.Argument(graphene.String, required=False),
+    )
+    household_validation_batch_error_report = graphene.Field(
+        HouseholdValidationErrorReportGQLType,
+        batch_id=graphene.Argument(graphene.UUID, required=True),
     )
 
     def resolve_household_validation_projects(parent, info, **kwargs):
@@ -84,6 +94,27 @@ class Query(graphene.ObjectType):
         return HouseholdValidationBatchRowsGQLType(
             rows=rows,
             count=len(rows),
+        )
+
+    def resolve_household_validation_batch_error_report(parent, info, **kwargs):
+        Query._check_permissions(
+            info.context.user,
+            HouseholdValidationConfig.gql_query_household_validation_error_report_perms,
+        )
+        batch = HouseholdValidationBatch.objects.get(
+            id=kwargs["batch_id"],
+            is_deleted=False,
+        )
+        error_rows = batch.rows.filter(
+            status=HouseholdValidationBatchRow.Status.ERROR,
+            is_deleted=False,
+        )
+        report = build_validation_error_report(batch)
+        return HouseholdValidationErrorReportGQLType(
+            batch_id=batch.id,
+            file_name=f"household_validation_errors_{batch.id}.csv",
+            file_base64=base64.b64encode(report.encode("utf-8")).decode("ascii"),
+            error_count=error_rows.count(),
         )
 
     @staticmethod

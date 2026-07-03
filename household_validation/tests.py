@@ -50,7 +50,12 @@ from household_validation.selection import (
 )
 from household_validation.upload import (
     PROJECT_SELECTION_TYPE_INTENT,
+    UploadedValidationRow,
+    VALIDATION_STATUS_NOT_VERIFIED,
     VALIDATION_LIST_SHEET,
+    build_validation_error_report_csv,
+    build_validation_json_ext,
+    member_structural_errors,
     parse_validation_workbook,
 )
 
@@ -476,6 +481,22 @@ class ValidationUploadParserTest(TestCase):
         self.assertEqual(parsed.rows, [])
         self.assertIn("Row 2: project is not in the project options", parsed.errors)
 
+    def test_parse_validation_workbook_resolves_duplicate_project_name_labels(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        project_options = workbook[PROJECT_OPTIONS_SHEET]
+        project_options.cell(row=1, column=3, value="project_label")
+        project_options.cell(row=2, column=3, value="Road Works (project-1)")
+        project_options.append(["project-2", "Road Works", "Road Works (project-2)"])
+        project_column = EXCEL_COLUMNS.index("project") + 1
+        worksheet.cell(row=2, column=project_column, value="Road Works (project-2)")
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows[0].project_id, "project-2")
+        self.assertEqual(parsed.rows[0].project_name, "Road Works")
+
     def _upload_workbook(self):
         workbook = Workbook()
         worksheet = workbook.active
@@ -545,9 +566,27 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(project_options.sheet_state, "hidden")
         self.assertEqual(project_options["A2"].value, "project-1")
         self.assertEqual(project_options["B2"].value, "Road Works, Phase 1")
+        self.assertEqual(project_options["C2"].value, "Road Works, Phase 1")
         formulas = {validation.formula1 for validation in worksheet.data_validations.dataValidation}
         self.assertIn('"YES,NO"', formulas)
-        self.assertIn("'Project Options'!$B$2:$B$2", formulas)
+        self.assertIn("'Project Options'!$C$2:$C$2", formulas)
+
+    def test_export_workbook_disambiguates_duplicate_project_names(self):
+        result = self._selection_result()
+        projects = [
+            SimpleNamespace(id="project-1", name="Road Works"),
+            SimpleNamespace(id="project-2", name="Road Works"),
+        ]
+
+        workbook = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+            projects=projects,
+        ).export_workbook()
+        project_options = workbook[PROJECT_OPTIONS_SHEET]
+
+        self.assertEqual(project_options["C2"].value, "Road Works (project-1)")
+        self.assertEqual(project_options["C3"].value, "Road Works (project-2)")
 
     def test_export_workbook_locks_structural_cells_and_unlocks_field_inputs(self):
         workbook = ExcelValidationListExporter(
@@ -616,3 +655,104 @@ class ExcelValidationListExporterTest(TestCase):
         district = SimpleNamespace(type="D", name="District", code="D01", parent=None)
         ta = SimpleNamespace(type="W", name="Traditional Authority", code="TA01", parent=district)
         return SimpleNamespace(type="V", name="Village", code="V01", parent=ta)
+
+
+class UploadHardeningTest(TestCase):
+    def test_build_validation_json_ext_persists_not_verified_status(self):
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={},
+            verified=False,
+            participant=False,
+            validation_date=date(2026, 7, 3),
+            project_name="Road Works",
+            project_id="project-1",
+            notes="Not available",
+        )
+
+        json_ext = build_validation_json_ext(
+            uploaded_row=uploaded_row,
+            project=None,
+            upload_date=date(2026, 7, 4),
+            uploaded_at=SimpleNamespace(isoformat=lambda: "2026-07-04T09:00:00+00:00"),
+            user_id="user-1",
+        )
+
+        self.assertEqual(json_ext["validation_status"], VALIDATION_STATUS_NOT_VERIFIED)
+        self.assertEqual(json_ext["last_verified_date"], "2026-07-03")
+        self.assertEqual(json_ext["validation_project_selection_type"], PROJECT_SELECTION_TYPE_INTENT)
+
+    def test_member_structural_errors_detect_protected_field_tampering(self):
+        group_individual = SimpleNamespace(
+            role="HEAD",
+            recipient_type="PRIMARY",
+            individual=SimpleNamespace(
+                first_name="Ada",
+                last_name="Worker",
+                dob=date(1990, 1, 1),
+                json_ext={
+                    "gender": "Female",
+                    "fit_for_work": True,
+                },
+            ),
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "member_name": "Grace Worker",
+                "member_gender": "Male",
+                "member_dob": "1991-01-01",
+                "member_age": "18",
+                "fit_for_work": "NO",
+                "head": "NO",
+                "current_recipient_type": "SECONDARY",
+            },
+            verified=None,
+            participant=False,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+
+        errors = member_structural_errors(uploaded_row, group_individual)
+
+        self.assertIn("Row 2: member_name does not match the household member", errors)
+        self.assertIn("Row 2: member_gender does not match the household member", errors)
+        self.assertIn("Row 2: fit_for_work does not match the household member", errors)
+        self.assertIn("Row 2: current_recipient_type does not match the household member", errors)
+
+    def test_build_validation_error_report_writes_error_rows_csv(self):
+        batch = SimpleNamespace(
+            id="batch-1",
+            rows=_FakeRows(
+                [
+                    SimpleNamespace(
+                        row_number=2,
+                        status="ERROR",
+                        raw_row={
+                            "group_code": "HH-001",
+                            "group_uuid": "group-1",
+                            "member_uuid": "member-1",
+                        },
+                        error_message="group_code does not match",
+                    )
+                ]
+            ),
+        )
+
+        report = build_validation_error_report_csv(batch.id, batch.rows.order_by("row_number"))
+
+        self.assertIn("batch_id,row_number,status,group_code,group_uuid,member_uuid,error_message", report)
+        self.assertIn("batch-1,2,ERROR,HH-001,group-1,member-1,group_code does not match", report)
+
+
+class _FakeRows:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def filter(self, **kwargs):
+        return self
+
+    def order_by(self, *fields):
+        return self.rows

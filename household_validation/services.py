@@ -25,7 +25,9 @@ from household_validation.selection import (
     select_households,
 )
 from household_validation.upload import (
-    PROJECT_SELECTION_TYPE_INTENT,
+    build_validation_error_report_csv,
+    build_validation_json_ext,
+    member_structural_errors,
     parse_validation_workbook,
 )
 
@@ -65,7 +67,7 @@ class HouseholdValidationUploadService:
                     continue
                 if uploaded_row.verified is True:
                     totals["households_verified"] += 1
-                else:
+                elif uploaded_row.verified is False:
                     totals["households_not_verified"] += 1
                 if uploaded_row.participant:
                     totals["participant_updates"] += 1
@@ -135,7 +137,7 @@ class HouseholdValidationUploadService:
             )
             return errors
 
-        if uploaded_row.verified is True:
+        if uploaded_row.verified is not None:
             self._apply_group_validation(
                 group=group,
                 uploaded_row=uploaded_row,
@@ -154,7 +156,7 @@ class HouseholdValidationUploadService:
             project=project,
             status=(
                 HouseholdValidationBatchRow.Status.APPLIED
-                if uploaded_row.verified is True or uploaded_row.participant
+                if uploaded_row.verified is not None or uploaded_row.participant
                 else HouseholdValidationBatchRow.Status.SKIPPED
             ),
         )
@@ -162,18 +164,14 @@ class HouseholdValidationUploadService:
 
     def _apply_group_validation(self, group, uploaded_row, project, upload_date, uploaded_at):
         json_ext = group.json_ext or {}
-        validation_date = uploaded_row.validation_date or upload_date
         json_ext.update(
-            {
-                "validation_status": "VERIFIED",
-                "last_verified_date": validation_date.isoformat(),
-                "validation_project_id": str(project.id) if project else uploaded_row.project_id,
-                "validation_project_name": project.name if project else uploaded_row.project_name,
-                "validation_project_selection_type": PROJECT_SELECTION_TYPE_INTENT,
-                "validation_uploaded_at": uploaded_at.isoformat(),
-                "validation_uploaded_by_id": str(getattr(self.user, "id", "")) or None,
-                "validation_notes": uploaded_row.notes,
-            }
+            build_validation_json_ext(
+                uploaded_row=uploaded_row,
+                project=project,
+                upload_date=upload_date,
+                uploaded_at=uploaded_at,
+                user_id=getattr(self.user, "id", None),
+            )
         )
         group.json_ext = json_ext
         group.save(user=self.user)
@@ -250,6 +248,13 @@ class HouseholdValidationUploadService:
     def _structural_errors(self, uploaded_row, group):
         errors = []
         row_number = uploaded_row.row_number
+        group_individual = self._group_individual(
+            uploaded_row.values.get("member_uuid"),
+            group=group,
+        )
+
+        if uploaded_row.values.get("row_type") not in ("MAIN", "RESERVE"):
+            errors.append(f"Row {row_number}: row_type is invalid")
         if self._normalize(uploaded_row.values.get("group_code")) != self._normalize(group.code):
             errors.append(f"Row {row_number}: group_code does not match the household")
 
@@ -264,6 +269,13 @@ class HouseholdValidationUploadService:
             database_value = self._normalize(self._location_name(location, location_type))
             if uploaded_value and database_value and uploaded_value != database_value:
                 errors.append(f"Row {row_number}: {column} does not match the household")
+        if group_individual is not None:
+            errors.extend(
+                member_structural_errors(
+                    uploaded_row,
+                    group_individual=group_individual,
+                )
+            )
         return errors
 
     def _location_name(self, location, location_type):
@@ -277,6 +289,8 @@ class HouseholdValidationUploadService:
     def _normalize(self, value):
         if value is None:
             return None
+        if isinstance(value, date):
+            value = value.isoformat()
         value = str(value).strip().casefold()
         return value or None
 
@@ -286,6 +300,14 @@ class HouseholdValidationUploadService:
         if totals["errors"]:
             return HouseholdValidationBatch.Status.PARTIAL_SUCCESS
         return HouseholdValidationBatch.Status.PROCESSED
+
+
+def build_validation_error_report(batch):
+    rows = batch.rows.filter(
+        status=HouseholdValidationBatchRow.Status.ERROR,
+        is_deleted=False,
+    ).order_by("row_number")
+    return build_validation_error_report_csv(batch.id, rows)
 
 
 class HouseholdValidationProjectLookupService:

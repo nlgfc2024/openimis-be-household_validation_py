@@ -34,7 +34,7 @@ EXCEL_COLUMNS = [
 ]
 
 PROJECT_OPTIONS_SHEET = "Project Options"
-PROJECT_OPTIONS_HEADERS = ["project_id", "project"]
+PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
 
 EDITABLE_COLUMNS = {
     "participant",
@@ -99,9 +99,11 @@ class ExcelValidationListExporter:
         worksheet = workbook.create_sheet(PROJECT_OPTIONS_SHEET)
         for column_number, title in enumerate(PROJECT_OPTIONS_HEADERS, start=1):
             worksheet.cell(row=1, column=column_number, value=title)
+        project_labels = self._project_labels()
         for row_number, project in enumerate(self.projects, start=2):
             worksheet.cell(row=row_number, column=1, value=self._project_id(project))
             worksheet.cell(row=row_number, column=2, value=self._project_name(project))
+            worksheet.cell(row=row_number, column=3, value=project_labels[id(project)])
         worksheet.sheet_state = "hidden"
         return worksheet
 
@@ -161,7 +163,7 @@ class ExcelValidationListExporter:
 
         project_count = len([project for project in self.projects if self._project_name(project)])
         if project_count:
-            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$B$2:$B${project_count + 1}"
+            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
             project_validation = DataValidation(
                 type="list",
                 formula1=project_formula,
@@ -210,3 +212,20 @@ class ExcelValidationListExporter:
 
     def _project_id(self, project):
         return str(getattr(project, "id", "") or getattr(project, "uuid", "") or "")
+
+    def _project_labels(self):
+        name_counts = {}
+        for project in self.projects:
+            project_name = self._project_name(project)
+            if project_name:
+                name_counts[project_name] = name_counts.get(project_name, 0) + 1
+
+        labels = {}
+        for project in self.projects:
+            project_name = self._project_name(project)
+            project_id = self._project_id(project)
+            if project_name and name_counts.get(project_name, 0) > 1 and project_id:
+                labels[id(project)] = f"{project_name} ({project_id})"
+            else:
+                labels[id(project)] = project_name
+        return labels
