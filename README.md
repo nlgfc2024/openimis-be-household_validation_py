@@ -17,14 +17,26 @@ Install or refresh backend module requirements from `openimis-be_py` as usual.
 
 ## Module Contents
 
-The initial scaffold provides:
+The module now provides the backend workflow for household validation:
 
 - Django app package: `household_validation`
 - Required openIMIS URL configuration: `household_validation/urls.py`
 - Python package metadata: `setup.py`
 - License and manifest files
+- Module configuration and permission constants in `household_validation/apps.py`
+- Batch tracking models in `household_validation/models.py`
+- Admin registration for validation batches and batch rows in `household_validation/admin.py`
+- Migrations for household validation rights, batch tracking tables, and district validation role-right assignment
+- Eligible household selection and quota logic in `household_validation/selection.py`
+- Project lookup support in `household_validation/project_lookup.py`
+- Excel validation list export in `household_validation/excel.py`
+- Excel upload parsing and validation helpers in `household_validation/upload.py`
+- Service layer for selection, project lookup, upload/apply, participant update, and error report generation in `household_validation/services.py`
+- GraphQL query and mutation surface in `household_validation/schema.py`, `household_validation/gql_queries.py`, and `household_validation/gql_mutations.py`
+- GraphQL permission helper in `household_validation/gql_permissions.py`
+- Focused backend tests in `household_validation/tests.py`
 
-Feature models, GraphQL schema, services, permissions, and migrations can be added incrementally as the household validation requirements are finalized.
+The implemented MVP generates Excel validation workbooks, parses uploaded validation workbooks, stores household validation metadata on `Group.Json_ext`, updates selected participants through `GroupIndividualService`, tracks batch/row outcomes, exposes batch history and error reports through GraphQL, and assigns the required household validation rights to configured administrator and district roles.
 
 ## Permissions
 
