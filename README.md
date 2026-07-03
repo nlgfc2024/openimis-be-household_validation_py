@@ -17,7 +17,7 @@ Install or refresh backend module requirements from `openimis-be_py` as usual.
 
 ## Module Contents
 
-The module now provides the backend workflow for household validation:
+The module provides the backend workflow for household validation:
 
 - Django app package: `household_validation`
 - Required openIMIS URL configuration: `household_validation/urls.py`
