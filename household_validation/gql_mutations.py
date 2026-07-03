@@ -37,6 +37,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
     Output = HouseholdValidationGenerateResultGQLType
 
     class Arguments:
+        region_id = graphene.Int(required=False)
+        region_code = graphene.String(required=False)
         district_id = graphene.Int(required=False)
         district_code = graphene.String(required=False)
         ta_id = graphene.Int(required=False)
@@ -49,6 +51,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
         catchment_code = graphene.String(required=False)
         exclude_verified_after = graphene.Date(required=False)
         target_count = graphene.Int(required=False)
+        female_headed_percentage = graphene.Int(required=False)
+        youth_percentage = graphene.Int(required=False)
         reserve_percentage = graphene.Int(required=False)
 
     @classmethod
@@ -62,6 +66,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             reserve_percentage = 10
 
         selection_result = EligibleHouseholdSelectionService(info.context.user).select(
+            region_id=data.get("region_id"),
+            region_code=data.get("region_code"),
             district_id=data.get("district_id"),
             district_code=data.get("district_code"),
             ta_id=data.get("ta_id"),
@@ -70,6 +76,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             village_code=data.get("village_code"),
             exclude_verified_after=data.get("exclude_verified_after"),
             target_count=data.get("target_count"),
+            female_headed_percentage=data.get("female_headed_percentage"),
+            youth_percentage=data.get("youth_percentage"),
             reserve_percentage=reserve_percentage,
         )
         projects = HouseholdValidationProjectLookupService().list_projects(
@@ -77,11 +85,13 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
                 data.get("village_id")
                 or data.get("ta_id")
                 or data.get("district_id")
+                or data.get("region_id")
             ),
             location_code=(
                 data.get("village_code")
                 or data.get("ta_code")
                 or data.get("district_code")
+                or data.get("region_code")
             ),
             hotspot_id=data.get("hotspot_id"),
             hotspot_code=data.get("hotspot_code"),
@@ -100,6 +110,10 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             json_ext={
                 "hotspot_id": data.get("hotspot_id"),
                 "catchment_id": data.get("catchment_id"),
+                "region_id": data.get("region_id"),
+                "region_code": data.get("region_code"),
+                "female_headed_percentage": data.get("female_headed_percentage"),
+                "youth_percentage": data.get("youth_percentage"),
                 "reserve_percentage": reserve_percentage,
                 "households_selected": len(selection_result.main),
                 "reserve_households": len(selection_result.reserve),

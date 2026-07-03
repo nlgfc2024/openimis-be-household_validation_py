@@ -156,11 +156,25 @@ def exclude_recently_verified(households, exclude_verified_after=None):
     ]
 
 
-def _allocate_quotas(target_count):
+def _normalize_percentage(value, default):
+    if value is None:
+        return default
+    value = max(0, min(int(value), 100))
+    return value / 100
+
+
+def _allocate_quotas(target_count, female_headed_percentage=None, youth_percentage=None):
+    female_weight = _normalize_percentage(female_headed_percentage, 0.4)
+    youth_weight = _normalize_percentage(youth_percentage, 0.4)
+    if female_weight + youth_weight > 1:
+        total = female_weight + youth_weight
+        female_weight = female_weight / total
+        youth_weight = youth_weight / total
+    other_weight = max(0, 1 - female_weight - youth_weight)
     weights = [
-        (CATEGORY_FEMALE_HEADED, 0.4),
-        (CATEGORY_YOUTH, 0.4),
-        (CATEGORY_OTHER, 0.2),
+        (CATEGORY_FEMALE_HEADED, female_weight),
+        (CATEGORY_YOUTH, youth_weight),
+        (CATEGORY_OTHER, other_weight),
     ]
     exact = [(category, target_count * weight) for category, weight in weights]
     quotas = {category: math.floor(value) for category, value in exact}
@@ -178,6 +192,8 @@ def _allocate_quotas(target_count):
 def select_households(
     households,
     target_count=None,
+    female_headed_percentage=None,
+    youth_percentage=None,
     reserve_percentage=10,
     exclude_verified_after=None,
 ):
@@ -190,7 +206,11 @@ def select_households(
 
     main_target = len(eligible) if target_count is None else target_count
     main_target = max(0, min(main_target, len(eligible)))
-    quotas = _allocate_quotas(main_target)
+    quotas = _allocate_quotas(
+        main_target,
+        female_headed_percentage=female_headed_percentage,
+        youth_percentage=youth_percentage,
+    )
 
     by_category = {
         CATEGORY_FEMALE_HEADED: [],
@@ -212,6 +232,8 @@ def select_households(
     }
     for category in (CATEGORY_FEMALE_HEADED, CATEGORY_YOUTH, CATEGORY_OTHER):
         for household in by_category[category]:
+            if len(main) >= main_target:
+                break
             if selected_category_counts[category] >= quotas[category]:
                 break
             selected_ids.add(household.id)

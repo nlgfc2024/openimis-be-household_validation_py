@@ -1,3 +1,4 @@
+from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
@@ -19,8 +20,12 @@ from household_validation.project_lookup import (
     project_option_from_project,
 )
 from household_validation.selection import (
+    CATEGORY_FEMALE_HEADED,
+    CATEGORY_OTHER,
+    CATEGORY_YOUTH,
     EligibleHousehold,
     EligibleMember,
+    ROW_TYPE_MAIN,
     is_truthy,
     select_households,
 )
@@ -357,12 +362,40 @@ class HouseholdValidationProjectLookupService:
         return queryset.filter(location_filter).distinct()
 
 
+@dataclass(frozen=True)
+class HouseholdValidationPreviewRow:
+    row_type: str
+    category: str
+    group_uuid: str
+    group_code: str | None
+    head_name: str | None
+    individual_uuid: str
+    individual_first_name: str | None
+    individual_last_name: str | None
+    individual_dob: date | None
+    individual_age: int | None
+    individual_gender: str | None
+    fit_for_work: bool
+    current_recipient_type: str | None
+    region: str | None
+    district: str | None
+    municipality: str | None
+    village: str | None
+    wealth_quintile: str | int | None
+    last_verified_date: date | None
+    validation_status: str | None
+    prospective_projects: list[str]
+
+
 class EligibleHouseholdSelectionService:
     def __init__(self, user=None):
         self.user = user
+        self._project_name_cache = {}
 
     def select(
         self,
+        region_id=None,
+        region_code=None,
         district_id=None,
         district_code=None,
         ta_id=None,
@@ -371,11 +404,13 @@ class EligibleHouseholdSelectionService:
         village_code=None,
         exclude_verified_after=None,
         target_count=None,
+        female_headed_percentage=None,
+        youth_percentage=None,
         reserve_percentage=10,
     ):
-        queryset = self._base_queryset()
-        queryset = self._apply_location_filters(
-            queryset,
+        candidates = self.candidates(
+            region_id=region_id,
+            region_code=region_code,
             district_id=district_id,
             district_code=district_code,
             ta_id=ta_id,
@@ -383,17 +418,113 @@ class EligibleHouseholdSelectionService:
             village_id=village_id,
             village_code=village_code,
         )
-        candidates = [
+        return select_households(
+            candidates,
+            target_count=target_count,
+            female_headed_percentage=female_headed_percentage,
+            youth_percentage=youth_percentage,
+            reserve_percentage=reserve_percentage,
+            exclude_verified_after=exclude_verified_after,
+        )
+
+    def candidates(
+        self,
+        region_id=None,
+        region_code=None,
+        district_id=None,
+        district_code=None,
+        ta_id=None,
+        ta_code=None,
+        village_id=None,
+        village_code=None,
+    ):
+        queryset = self._base_queryset()
+        queryset = self._apply_location_filters(
+            queryset,
+            region_id=region_id,
+            region_code=region_code,
+            district_id=district_id,
+            district_code=district_code,
+            ta_id=ta_id,
+            ta_code=ta_code,
+            village_id=village_id,
+            village_code=village_code,
+        )
+        return [
             household
             for household in (self._build_household(group) for group in queryset)
             if household is not None
         ]
-        return select_households(
-            candidates,
-            target_count=target_count,
-            reserve_percentage=reserve_percentage,
-            exclude_verified_after=exclude_verified_after,
+
+    def summary(self, **filters):
+        queryset = self._base_queryset()
+        queryset = self._apply_location_filters(
+            queryset,
+            region_id=filters.get("region_id"),
+            region_code=filters.get("region_code"),
+            district_id=filters.get("district_id"),
+            district_code=filters.get("district_code"),
+            ta_id=filters.get("ta_id"),
+            ta_code=filters.get("ta_code"),
+            village_id=filters.get("village_id"),
+            village_code=filters.get("village_code"),
         )
+        groups = list(queryset)
+        total_households = len(groups)
+        total_individuals = sum(
+            len([member for member in group.groupindividuals.all() if not member.is_deleted])
+            for group in groups
+        )
+        candidates = [
+            household
+            for household in (self._build_household(group) for group in groups)
+            if household is not None
+        ]
+        selection_result = select_households(
+            candidates,
+            target_count=filters.get("target_count"),
+            female_headed_percentage=filters.get("female_headed_percentage"),
+            youth_percentage=filters.get("youth_percentage"),
+            reserve_percentage=(
+                10
+                if filters.get("reserve_percentage") is None
+                else filters.get("reserve_percentage")
+            ),
+            exclude_verified_after=filters.get("exclude_verified_after"),
+        )
+        main_rows = [
+            row
+            for row in selection_result.member_rows
+            if row.row_type == ROW_TYPE_MAIN
+        ]
+        category_counts = {
+            CATEGORY_FEMALE_HEADED: 0,
+            CATEGORY_YOUTH: 0,
+            CATEGORY_OTHER: 0,
+        }
+        for selected in selection_result.main:
+            category_counts[selected.category] += 1
+        return {
+            "total_households": total_households,
+            "total_individuals": total_individuals,
+            "eligible_households": len(candidates),
+            "eligible_individuals": sum(len(h.eligible_members) for h in candidates),
+            "selected_households": len(selection_result.main),
+            "selected_individuals": len(main_rows),
+            "selected_female_headed_households": category_counts[CATEGORY_FEMALE_HEADED],
+            "selected_youth_households": category_counts[CATEGORY_YOUTH],
+            "selected_other_households": category_counts[CATEGORY_OTHER],
+            "reserve_households": len(selection_result.reserve),
+            "main_households": len(selection_result.main),
+            "generated_at": timezone.now(),
+        }
+
+    def preview(self, **filters):
+        selection_result = self.select(**filters)
+        return [
+            self._preview_row(selected_member)
+            for selected_member in selection_result.member_rows
+        ]
 
     def _base_queryset(self):
         queryset = Group.objects.select_related("location").prefetch_related(
@@ -406,6 +537,8 @@ class EligibleHouseholdSelectionService:
     def _apply_location_filters(
         self,
         queryset,
+        region_id=None,
+        region_code=None,
         district_id=None,
         district_code=None,
         ta_id=None,
@@ -444,6 +577,23 @@ class EligibleHouseholdSelectionService:
                     | Q(location__parent__parent__code=district_code)
                 )
             return queryset.filter(district_filter)
+        if region_id or region_code:
+            region_filter = Q()
+            if region_id:
+                region_filter |= (
+                    Q(location_id=region_id)
+                    | Q(location__parent_id=region_id)
+                    | Q(location__parent__parent_id=region_id)
+                    | Q(location__parent__parent__parent_id=region_id)
+                )
+            if region_code:
+                region_filter |= (
+                    Q(location__code=region_code)
+                    | Q(location__parent__code=region_code)
+                    | Q(location__parent__parent__code=region_code)
+                    | Q(location__parent__parent__parent__code=region_code)
+                )
+            return queryset.filter(region_filter)
         return queryset
 
     def _build_household(self, group):
@@ -527,3 +677,67 @@ class EligibleHouseholdSelectionService:
             return date.fromisoformat(str(value)[:10])
         except ValueError:
             return None
+
+    def _preview_row(self, selected_member):
+        household = selected_member.household
+        member = selected_member.member
+        group = household.source
+        group_individual = member.source
+        individual = getattr(group_individual, "individual", None)
+        location = getattr(group, "location", None)
+        group_json_ext = getattr(group, "json_ext", None) or {}
+        return HouseholdValidationPreviewRow(
+            row_type=selected_member.row_type,
+            category=selected_member.category,
+            group_uuid=str(household.id),
+            group_code=household.code,
+            head_name=self._member_name(getattr(household.head, "source", None)),
+            individual_uuid=str(member.id),
+            individual_first_name=getattr(individual, "first_name", None),
+            individual_last_name=getattr(individual, "last_name", None),
+            individual_dob=getattr(individual, "dob", None),
+            individual_age=member.age,
+            individual_gender=member.gender,
+            fit_for_work=member.fit_for_work,
+            current_recipient_type=member.recipient_type,
+            region=self._location_name(location, "R"),
+            district=self._location_name(location, "D"),
+            municipality=self._location_name(location, "W"),
+            village=self._location_name(location, "V"),
+            wealth_quintile=household.wealth_quintile,
+            last_verified_date=household.last_verified_date,
+            validation_status=group_json_ext.get("validation_status"),
+            prospective_projects=self._project_names(location),
+        )
+
+    def _member_name(self, group_individual):
+        individual = getattr(group_individual, "individual", None)
+        if not individual:
+            return None
+        first_name = getattr(individual, "first_name", "") or ""
+        last_name = getattr(individual, "last_name", "") or ""
+        return f"{first_name} {last_name}".strip() or None
+
+    def _location_name(self, location, location_type):
+        current = location
+        while current is not None:
+            if getattr(current, "type", None) == location_type:
+                return getattr(current, "name", None) or getattr(current, "code", None)
+            current = getattr(current, "parent", None)
+        return None
+
+    def _project_names(self, location):
+        location_id = getattr(location, "id", None)
+        if not location_id:
+            return []
+        if location_id in self._project_name_cache:
+            return self._project_name_cache[location_id]
+        project_names = [
+            project.name
+            for project in HouseholdValidationProjectLookupService().list_projects(
+                location_id=location_id,
+            )
+            if project.name
+        ]
+        self._project_name_cache[location_id] = project_names
+        return project_names

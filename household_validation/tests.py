@@ -48,6 +48,7 @@ from household_validation.selection import (
     is_truthy,
     select_households,
 )
+from household_validation.services import EligibleHouseholdSelectionService
 from household_validation.upload import (
     PROJECT_SELECTION_TYPE_INTENT,
     UploadedValidationRow,
@@ -329,6 +330,170 @@ class HouseholdSelectionTest(TestCase):
             self.assertTrue(is_truthy(value))
         for value in (False, 0, "0", "false", "no", None, ""):
             self.assertFalse(is_truthy(value))
+
+    def test_select_households_accepts_percentage_overrides(self):
+        households = [
+            _household("female", "Poorest", head_gender="Female"),
+            _household("youth", "Poorest", eligible_member_age=25),
+            _household("other", "Poorest"),
+        ]
+
+        result = select_households(
+            households,
+            target_count=2,
+            female_headed_percentage=0,
+            youth_percentage=100,
+            reserve_percentage=0,
+        )
+
+        self.assertEqual(
+            [row.category for row in result.main],
+            [CATEGORY_YOUTH, CATEGORY_FEMALE_HEADED],
+        )
+
+
+class HouseholdValidationPreviewServiceTest(TestCase):
+    def test_summary_and_preview_share_selection_result(self):
+        service = _FakeSelectionService(
+            [
+                _fake_group("group-1", "HH-001", "Female", 30, "Poorest"),
+                _fake_group("group-2", "HH-002", "Male", 22, "Poorer"),
+                _fake_group("group-3", "HH-003", "Male", 45, "Middle"),
+            ]
+        )
+
+        filters = {
+            "target_count": 2,
+            "reserve_percentage": 50,
+        }
+        summary = service.summary(**filters)
+        preview_rows = service.preview(**filters)
+
+        self.assertEqual(summary["total_households"], 3)
+        self.assertEqual(summary["total_individuals"], 3)
+        self.assertEqual(summary["eligible_households"], 3)
+        self.assertEqual(summary["selected_households"], 2)
+        self.assertEqual(summary["selected_individuals"], 2)
+        self.assertEqual(summary["reserve_households"], 1)
+        self.assertEqual(len(preview_rows), 3)
+        self.assertEqual(
+            len([row for row in preview_rows if row.row_type == ROW_TYPE_MAIN]),
+            summary["selected_individuals"],
+        )
+
+    def test_preview_rows_include_location_and_validation_fields(self):
+        service = _FakeSelectionService(
+            [
+                _fake_group(
+                    "group-1",
+                    "HH-001",
+                    "Female",
+                    30,
+                    "Poorest",
+                    validation_status="VERIFIED",
+                )
+            ]
+        )
+
+        row = service.preview(target_count=1, reserve_percentage=0)[0]
+
+        self.assertEqual(row.group_uuid, "group-1")
+        self.assertEqual(row.group_code, "HH-001")
+        self.assertEqual(row.head_name, "Head Person")
+        self.assertEqual(row.individual_first_name, "Head")
+        self.assertEqual(row.region, "Region")
+        self.assertEqual(row.district, "District")
+        self.assertEqual(row.municipality, "Traditional Authority")
+        self.assertEqual(row.village, "Village")
+        self.assertEqual(row.wealth_quintile, "Poorest")
+        self.assertEqual(row.validation_status, "VERIFIED")
+
+
+class _FakeSelectionService(EligibleHouseholdSelectionService):
+    def __init__(self, groups):
+        super().__init__(user=None)
+        self.groups = groups
+
+    def _base_queryset(self):
+        return _FakeQuerySet(self.groups)
+
+    def _project_names(self, location):
+        return []
+
+
+class _FakeQuerySet:
+    def __init__(self, groups):
+        self.groups = groups
+
+    def __iter__(self):
+        return iter(self.groups)
+
+    def filter(self, *args, **kwargs):
+        return self
+
+    def select_related(self, *args, **kwargs):
+        return self
+
+    def prefetch_related(self, *args, **kwargs):
+        return self
+
+
+class _FakeRelatedManager:
+    def __init__(self, rows):
+        self.rows = rows
+
+    def all(self):
+        return self.rows
+
+
+def _fake_group(
+    group_id,
+    code,
+    head_gender,
+    worker_age,
+    wealth_quintile,
+    validation_status=None,
+):
+    location = _fake_location_tree()
+    individual = SimpleNamespace(
+        id=f"{group_id}-individual",
+        first_name="Head",
+        last_name="Person",
+        dob=_dob_for_age(worker_age),
+        json_ext={
+            "gender": head_gender,
+            "fit_for_work": True,
+            "household_wealth_quintile": wealth_quintile,
+        },
+    )
+    group_individual = SimpleNamespace(
+        id=f"{group_id}-member",
+        is_deleted=False,
+        role="HEAD",
+        recipient_type="PRIMARY",
+        individual=individual,
+        individual_id=individual.id,
+    )
+    json_ext = {
+        "head_id": individual.id,
+        "household_wealth_quintile": wealth_quintile,
+    }
+    if validation_status:
+        json_ext["validation_status"] = validation_status
+    return SimpleNamespace(
+        id=group_id,
+        code=code,
+        json_ext=json_ext,
+        location=location,
+        groupindividuals=_FakeRelatedManager([group_individual]),
+    )
+
+
+def _fake_location_tree():
+    region = SimpleNamespace(type="R", name="Region", code="R01", parent=None, id=1)
+    district = SimpleNamespace(type="D", name="District", code="D01", parent=region, id=2)
+    ta = SimpleNamespace(type="W", name="Traditional Authority", code="TA01", parent=district, id=3)
+    return SimpleNamespace(type="V", name="Village", code="V01", parent=ta, id=4)
 
 
 class ProjectLookupTest(TestCase):
