@@ -18,6 +18,11 @@ from household_validation.excel import (
     PROJECT_OPTIONS_SHEET,
     ExcelValidationListExporter,
 )
+from household_validation.project_lookup import (
+    ACTIVE_PROJECT_STATUSES,
+    ProjectOption,
+    project_option_from_project,
+)
 from household_validation.selection import (
     CATEGORY_FEMALE_HEADED,
     CATEGORY_OTHER,
@@ -257,6 +262,39 @@ class HouseholdSelectionTest(TestCase):
             self.assertTrue(is_truthy(value))
         for value in (False, 0, "0", "false", "no", None, ""):
             self.assertFalse(is_truthy(value))
+
+
+class ProjectLookupTest(TestCase):
+    def test_active_project_statuses_match_mvp_dropdown_scope(self):
+        self.assertEqual(ACTIVE_PROJECT_STATUSES, ("PREPARATION", "IN_PROGRESS"))
+
+    def test_project_option_from_project_serializes_project_fields(self):
+        project = SimpleNamespace(
+            id="project-1",
+            name="Road Works",
+            status="PREPARATION",
+            location_id=12,
+        )
+
+        self.assertEqual(
+            project_option_from_project(project),
+            ProjectOption(
+                id="project-1",
+                name="Road Works",
+                status="PREPARATION",
+                location_id="12",
+            ),
+        )
+
+    def test_project_option_from_project_falls_back_to_location_object(self):
+        project = SimpleNamespace(
+            id="project-2",
+            name="Drainage",
+            status="IN_PROGRESS",
+            location=SimpleNamespace(id=21),
+        )
+
+        self.assertEqual(project_option_from_project(project).location_id, "21")
 
 
 class ExcelValidationListExporterTest(TestCase):

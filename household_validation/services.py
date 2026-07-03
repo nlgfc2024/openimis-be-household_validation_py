@@ -3,13 +3,65 @@ from datetime import date
 from django.db.models import Q
 
 from individual.models import Group, GroupIndividual
+from social_protection.models import Project
 
+from household_validation.project_lookup import (
+    ACTIVE_PROJECT_STATUSES,
+    project_option_from_project,
+)
 from household_validation.selection import (
     EligibleHousehold,
     EligibleMember,
     is_truthy,
     select_households,
 )
+
+
+class HouseholdValidationProjectLookupService:
+    def list_projects(
+        self,
+        location_id=None,
+        location_code=None,
+        hotspot_id=None,
+        hotspot_code=None,
+        catchment_id=None,
+    ):
+        queryset = Project.objects.select_related("location").filter(
+            status__in=ACTIVE_PROJECT_STATUSES,
+        )
+        queryset = self._apply_location_filter(
+            queryset,
+            location_id=location_id,
+            location_code=location_code,
+        )
+        # Hotspot and public works catchment models do not exist yet. Keep the
+        # nullable filter signature stable and add relation filters when they do.
+        return [
+            project_option_from_project(project)
+            for project in queryset.order_by("name", "id")
+        ]
+
+    def _apply_location_filter(self, queryset, location_id=None, location_code=None):
+        location_filter = Q()
+        if location_id:
+            location_filter |= (
+                Q(location_id=location_id)
+                | Q(location__parent_id=location_id)
+                | Q(location__parent__parent_id=location_id)
+                | Q(location__children__id=location_id)
+                | Q(location__children__children__id=location_id)
+            )
+        if location_code:
+            location_filter |= (
+                Q(location__code=location_code)
+                | Q(location__parent__code=location_code)
+                | Q(location__parent__parent__code=location_code)
+                | Q(location__children__code=location_code)
+                | Q(location__children__children__code=location_code)
+            )
+        if not location_filter:
+            return queryset
+        return queryset.filter(location_filter).distinct()
 
 
 class EligibleHouseholdSelectionService:
