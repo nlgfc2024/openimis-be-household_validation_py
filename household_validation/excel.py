@@ -1,0 +1,231 @@
+from io import BytesIO
+
+from openpyxl import Workbook
+from openpyxl.styles import Font, PatternFill, Protection
+from openpyxl.utils import get_column_letter
+from openpyxl.worksheet.datavalidation import DataValidation
+
+
+YES_NO_FORMULA = '"YES,NO"'
+PARTICIPANT_FORMULA = '"YES,NO"'
+
+EXCEL_COLUMNS = [
+    "batch_id",
+    "row_type",
+    "district",
+    "TA",
+    "village",
+    "group_code",
+    "group_uuid",
+    "member_uuid",
+    "member_name",
+    "member_gender",
+    "member_dob",
+    "member_age",
+    "fit_for_work",
+    "head",
+    "current_recipient_type",
+    "participant",
+    "verified",
+    "validation_date",
+    "project",
+    "project_id",
+    "validation_notes",
+]
+
+PROJECT_OPTIONS_SHEET = "Project Options"
+PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
+
+EDITABLE_COLUMNS = {
+    "participant",
+    "verified",
+    "validation_date",
+    "project",
+    "validation_notes",
+}
+
+
+class ExcelValidationListExporter:
+    def __init__(self, selection_result, batch_id, projects=None):
+        self.selection_result = selection_result
+        self.batch_id = batch_id
+        self.projects = projects or []
+
+    def export_workbook(self):
+        workbook = Workbook()
+        worksheet = workbook.active
+        worksheet.title = "Validation List"
+
+        self._write_header(worksheet)
+        self._write_rows(worksheet)
+        project_options_worksheet = self._write_project_options(workbook)
+        self._apply_validation(worksheet)
+        self._apply_protection(worksheet)
+        self._autosize_columns(worksheet)
+        self._autosize_columns(project_options_worksheet)
+
+        project_id_column = EXCEL_COLUMNS.index("project_id") + 1
+        worksheet.column_dimensions[worksheet.cell(1, project_id_column).column_letter].hidden = True
+        return workbook
+
+    def export_bytes(self):
+        output = BytesIO()
+        self.export_workbook().save(output)
+        output.seek(0)
+        return output.getvalue()
+
+    def _write_header(self, worksheet):
+        header_fill = PatternFill("solid", fgColor="D9EAD3")
+        for column_number, title in enumerate(EXCEL_COLUMNS, start=1):
+            cell = worksheet.cell(row=1, column=column_number, value=title)
+            cell.font = Font(bold=True)
+            cell.fill = header_fill
+            cell.protection = Protection(locked=True)
+        worksheet.freeze_panes = "A2"
+        worksheet.auto_filter.ref = worksheet.dimensions
+
+    def _write_rows(self, worksheet):
+        for row_number, selected_member in enumerate(self.selection_result.member_rows, start=2):
+            values = self._build_row(selected_member)
+            for column_number, title in enumerate(EXCEL_COLUMNS, start=1):
+                cell = worksheet.cell(
+                    row=row_number,
+                    column=column_number,
+                    value=values.get(title),
+                )
+                cell.protection = Protection(locked=title not in EDITABLE_COLUMNS)
+
+    def _write_project_options(self, workbook):
+        worksheet = workbook.create_sheet(PROJECT_OPTIONS_SHEET)
+        for column_number, title in enumerate(PROJECT_OPTIONS_HEADERS, start=1):
+            worksheet.cell(row=1, column=column_number, value=title)
+        project_labels = self._project_labels()
+        for row_number, project in enumerate(self.projects, start=2):
+            worksheet.cell(row=row_number, column=1, value=self._project_id(project))
+            worksheet.cell(row=row_number, column=2, value=self._project_name(project))
+            worksheet.cell(row=row_number, column=3, value=project_labels[id(project)])
+        worksheet.sheet_state = "hidden"
+        return worksheet
+
+    def _build_row(self, selected_member):
+        household = selected_member.household
+        member = selected_member.member
+        group = household.source
+        group_individual = member.source
+        individual = getattr(group_individual, "individual", None)
+        location = getattr(group, "location", None)
+
+        return {
+            "batch_id": str(self.batch_id),
+            "row_type": selected_member.row_type,
+            "district": self._location_name(location, "D"),
+            "TA": self._location_name(location, "W"),
+            "village": self._location_name(location, "V"),
+            "group_code": household.code,
+            "group_uuid": str(household.id),
+            "member_uuid": str(member.id),
+            "member_name": self._member_name(individual),
+            "member_gender": member.gender,
+            "member_dob": member.dob,
+            "member_age": member.age,
+            "fit_for_work": "YES" if member.fit_for_work else "NO",
+            "head": "YES" if self._is_head(member) else "NO",
+            "current_recipient_type": member.recipient_type,
+            "participant": None,
+            "verified": None,
+            "validation_date": None,
+            "project": None,
+            "project_id": None,
+            "validation_notes": None,
+        }
+
+    def _apply_validation(self, worksheet):
+        max_row = max(worksheet.max_row, 2)
+        participant_col = self._column_letter("participant")
+        verified_col = self._column_letter("verified")
+        project_col = self._column_letter("project")
+
+        participant_validation = DataValidation(
+            type="list",
+            formula1=PARTICIPANT_FORMULA,
+            allow_blank=True,
+        )
+        verified_validation = DataValidation(
+            type="list",
+            formula1=YES_NO_FORMULA,
+            allow_blank=True,
+        )
+
+        worksheet.add_data_validation(participant_validation)
+        worksheet.add_data_validation(verified_validation)
+        participant_validation.add(f"{participant_col}2:{participant_col}{max_row}")
+        verified_validation.add(f"{verified_col}2:{verified_col}{max_row}")
+
+        project_count = len([project for project in self.projects if self._project_name(project)])
+        if project_count:
+            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
+            project_validation = DataValidation(
+                type="list",
+                formula1=project_formula,
+                allow_blank=True,
+            )
+            worksheet.add_data_validation(project_validation)
+            project_validation.add(f"{project_col}2:{project_col}{max_row}")
+
+    def _apply_protection(self, worksheet):
+        worksheet.protection.sheet = True
+        worksheet.protection.enable()
+
+    def _autosize_columns(self, worksheet):
+        for column_cells in worksheet.columns:
+            max_length = 0
+            column_letter = column_cells[0].column_letter
+            for cell in column_cells:
+                value = cell.value
+                if value is not None:
+                    max_length = max(max_length, len(str(value)))
+            worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 12), 40)
+
+    def _column_letter(self, column_name):
+        return get_column_letter(EXCEL_COLUMNS.index(column_name) + 1)
+
+    def _location_name(self, location, location_type):
+        current = location
+        while current is not None:
+            if getattr(current, "type", None) == location_type:
+                return getattr(current, "name", None) or getattr(current, "code", None)
+            current = getattr(current, "parent", None)
+        return None
+
+    def _member_name(self, individual):
+        if not individual:
+            return None
+        first_name = getattr(individual, "first_name", "") or ""
+        last_name = getattr(individual, "last_name", "") or ""
+        return f"{first_name} {last_name}".strip()
+
+    def _is_head(self, member):
+        return str(member.role or "").upper() == "HEAD"
+
+    def _project_name(self, project):
+        return getattr(project, "name", None)
+
+    def _project_id(self, project):
+        return str(getattr(project, "id", "") or getattr(project, "uuid", "") or "")
+
+    def _project_labels(self):
+        name_counts = {}
+        for project in self.projects:
+            project_name = self._project_name(project)
+            if project_name:
+                name_counts[project_name] = name_counts.get(project_name, 0) + 1
+
+        labels = {}
+        for project in self.projects:
+            project_name = self._project_name(project)
+            project_id = self._project_id(project)
+            if project_name and name_counts.get(project_name, 0) > 1 and project_id:
+                labels[id(project)] = f"{project_name} ({project_id})"
+            else:
+                labels[id(project)] = project_name
+        return labels
