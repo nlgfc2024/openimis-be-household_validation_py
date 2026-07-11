@@ -10,15 +10,12 @@ import simple_history.models
 
 
 class Migration(migrations.Migration):
-
-    initial = True
-
     dependencies = [
-        ('social_protection', '0024_alter_activity_date_created_and_more'),
-        ('location', '0019_alter_location_code'),
-        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
-        ('individual', '0019_alter_group_date_created_alter_group_date_updated_and_more'),
         ('household_validation', '0001_add_household_validation_rights'),
+        ('social_protection', '0016_project_historicalproject'),
+        ('individual', '0003_group_groupindividual_historicalgroup_historicalgroupindividual'),
+        ('location', '0002_location'),
+        migrations.swappable_dependency(settings.AUTH_USER_MODEL),
     ]
 
     operations = [
