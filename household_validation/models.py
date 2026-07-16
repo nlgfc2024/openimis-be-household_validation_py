@@ -4,7 +4,7 @@ from django.utils.translation import gettext_lazy as _
 from core.models import HistoryModel
 from individual.models import Group, GroupIndividual, Individual
 from location.models import Location
-from social_protection.models import Project
+from project_social_protection.models import Project
 
 
 class HouseholdValidationBatch(HistoryModel):

@@ -9,7 +9,7 @@ from django.utils import timezone
 
 from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService
-from social_protection.models import Project
+from project_social_protection.models import Project
 
 from household_validation.models import (
     HouseholdValidationBatch,

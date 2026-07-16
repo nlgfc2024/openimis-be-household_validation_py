@@ -12,7 +12,7 @@ import simple_history.models
 class Migration(migrations.Migration):
     dependencies = [
         ('household_validation', '0001_add_household_validation_rights'),
-        ('social_protection', '0016_project_historicalproject'),
+        ('project_social_protection', '0001_initial'),
         ('individual', '0003_group_groupindividual_historicalgroup_historicalgroupindividual'),
         ('location', '0002_location'),
         migrations.swappable_dependency(settings.AUTH_USER_MODEL),
@@ -68,7 +68,7 @@ class Migration(migrations.Migration):
                 ('group', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='household_validation_rows', to='individual.group')),
                 ('group_individual', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='household_validation_rows', to='individual.groupindividual')),
                 ('individual', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='household_validation_rows', to='individual.individual')),
-                ('project', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='household_validation_rows', to='social_protection.project')),
+                ('project', models.ForeignKey(blank=True, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='household_validation_rows', to='project_social_protection.project')),
                 ('user_created', models.ForeignKey(db_column='UserCreatedUUID', on_delete=django.db.models.deletion.DO_NOTHING, related_name='%(class)s_user_created', to=settings.AUTH_USER_MODEL)),
                 ('user_updated', models.ForeignKey(db_column='UserUpdatedUUID', on_delete=django.db.models.deletion.DO_NOTHING, related_name='%(class)s_user_updated', to=settings.AUTH_USER_MODEL)),
             ],
@@ -103,7 +103,7 @@ class Migration(migrations.Migration):
                 ('group_individual', models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='individual.groupindividual')),
                 ('history_user', models.ForeignKey(null=True, on_delete=django.db.models.deletion.SET_NULL, related_name='+', to=settings.AUTH_USER_MODEL)),
                 ('individual', models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='individual.individual')),
-                ('project', models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='social_protection.project')),
+                ('project', models.ForeignKey(blank=True, db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to='project_social_protection.project')),
                 ('user_created', models.ForeignKey(blank=True, db_column='UserCreatedUUID', db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to=settings.AUTH_USER_MODEL)),
                 ('user_updated', models.ForeignKey(blank=True, db_column='UserUpdatedUUID', db_constraint=False, null=True, on_delete=django.db.models.deletion.DO_NOTHING, related_name='+', to=settings.AUTH_USER_MODEL)),
             ],
