@@ -402,6 +402,7 @@ class EligibleHouseholdSelectionService:
         ta_code=None,
         village_id=None,
         village_code=None,
+        village_codes=None,
         exclude_verified_after=None,
         target_count=None,
         female_headed_percentage=None,
@@ -417,6 +418,7 @@ class EligibleHouseholdSelectionService:
             ta_code=ta_code,
             village_id=village_id,
             village_code=village_code,
+            village_codes=village_codes,
         )
         return select_households(
             candidates,
@@ -437,6 +439,7 @@ class EligibleHouseholdSelectionService:
         ta_code=None,
         village_id=None,
         village_code=None,
+        village_codes=None,
     ):
         queryset = self._base_queryset()
         queryset = self._apply_location_filters(
@@ -449,6 +452,7 @@ class EligibleHouseholdSelectionService:
             ta_code=ta_code,
             village_id=village_id,
             village_code=village_code,
+            village_codes=village_codes,
         )
         return [
             household
@@ -468,6 +472,7 @@ class EligibleHouseholdSelectionService:
             ta_code=filters.get("ta_code"),
             village_id=filters.get("village_id"),
             village_code=filters.get("village_code"),
+            village_codes=filters.get("village_codes"),
         )
         groups = list(queryset)
         total_households = len(groups)
@@ -545,13 +550,20 @@ class EligibleHouseholdSelectionService:
         ta_code=None,
         village_id=None,
         village_code=None,
+        village_codes=None,
     ):
-        if village_id or village_code:
+        # Accept both the legacy singular ``village_code`` and the plural
+        # ``village_codes`` list; merge them into a single code set.
+        codes = list(village_codes or [])
+        if village_code:
+            codes.append(village_code)
+
+        if village_id or codes:
             village_filter = Q()
             if village_id:
                 village_filter |= Q(location_id=village_id)
-            if village_code:
-                village_filter |= Q(location__code=village_code)
+            if codes:
+                village_filter |= Q(location__code__in=codes)
             return queryset.filter(village_filter)
 
         if ta_id or ta_code:

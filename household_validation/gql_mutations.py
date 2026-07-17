@@ -45,6 +45,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
         ta_code = graphene.String(required=False)
         village_id = graphene.Int(required=False)
         village_code = graphene.String(required=False)
+        village_codes = graphene.List(graphene.String, required=False)
         hotspot_id = graphene.String(required=False)
         hotspot_code = graphene.String(required=False)
         catchment_id = graphene.String(required=False)
@@ -74,6 +75,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             ta_code=data.get("ta_code"),
             village_id=data.get("village_id"),
             village_code=data.get("village_code"),
+            village_codes=data.get("village_codes"),
             exclude_verified_after=data.get("exclude_verified_after"),
             target_count=data.get("target_count"),
             female_headed_percentage=data.get("female_headed_percentage"),
@@ -89,6 +91,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             ),
             location_code=(
                 data.get("village_code")
+                or next(iter(data.get("village_codes") or []), None)
                 or data.get("ta_code")
                 or data.get("district_code")
                 or data.get("region_code")
