@@ -37,6 +37,16 @@ from household_validation.upload import (
 )
 
 
+def _local_date(value):
+    """Local date of ``value``, tolerating naive datetimes.
+
+    openIMIS runs with ``USE_TZ = False``, so ``timezone.now()`` is naive and
+    ``timezone.localdate()``/``timezone.localtime()`` raise ValueError. Mirrors
+    the guard used in ``core.services.userServices``.
+    """
+    return timezone.localtime(value).date() if timezone.is_aware(value) else value.date()
+
+
 class HouseholdValidationUploadService:
     def __init__(self, user=None):
         self.user = user
@@ -55,8 +65,8 @@ class HouseholdValidationUploadService:
             return totals
 
         batch = self._get_or_create_batch(parsed, source_file_name=source_file_name)
-        upload_date = timezone.localdate()
         uploaded_at = timezone.now()
+        upload_date = _local_date(uploaded_at)
 
         with transaction.atomic():
             for uploaded_row in parsed.rows:

@@ -1,8 +1,9 @@
-from datetime import date
+from datetime import date, datetime, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 
+from django.utils import timezone
 from openpyxl import Workbook
 
 from household_validation.apps import (
@@ -48,7 +49,10 @@ from household_validation.selection import (
     is_truthy,
     select_households,
 )
-from household_validation.services import EligibleHouseholdSelectionService
+from household_validation.services import (
+    EligibleHouseholdSelectionService,
+    _local_date,
+)
 from household_validation.upload import (
     PROJECT_SELECTION_TYPE_INTENT,
     UploadedValidationRow,
@@ -910,6 +914,24 @@ class UploadHardeningTest(TestCase):
 
         self.assertIn("batch_id,row_number,status,group_code,group_uuid,member_uuid,error_message", report)
         self.assertIn("batch-1,2,ERROR,HH-001,group-1,member-1,group_code does not match", report)
+
+
+class LocalDateTests(TestCase):
+    """openIMIS runs with USE_TZ = False, so timezone.now() is naive.
+
+    Passing a naive datetime to timezone.localdate()/localtime() raises
+    ValueError("localtime() cannot be applied to a naive datetime"), which
+    previously aborted every non-dry-run validation-list upload.
+    """
+
+    def test_naive_datetime_returns_its_date(self):
+        naive = datetime(2026, 7, 29, 12, 27)
+        self.assertIsNone(naive.tzinfo)
+        self.assertEqual(_local_date(naive), date(2026, 7, 29))
+
+    def test_aware_datetime_is_converted_to_local_date(self):
+        aware = datetime(2026, 7, 29, 12, 27, tzinfo=datetime_timezone.utc)
+        self.assertEqual(_local_date(aware), timezone.localtime(aware).date())
 
 
 class _FakeRows:
