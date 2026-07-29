@@ -253,11 +253,11 @@ class HouseholdValidationUploadService:
         except (ValueError, ValidationError):
             return None
 
-    def _group_individual(self, group_individual_id, group):
+    def _group_individual(self, individual_id, group):
         try:
             return (
                 GroupIndividual.objects.filter(
-                    id=group_individual_id,
+                    individual_id=individual_id,
                     group=group,
                     is_deleted=False,
                 )

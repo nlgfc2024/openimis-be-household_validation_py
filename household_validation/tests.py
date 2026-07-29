@@ -2,6 +2,7 @@ from datetime import date, datetime, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import MagicMock, patch
 
 from django.utils import timezone
 from openpyxl import Workbook
@@ -51,6 +52,7 @@ from household_validation.selection import (
 )
 from household_validation.services import (
     EligibleHouseholdSelectionService,
+    HouseholdValidationUploadService,
     _json_safe,
     _local_date,
 )
@@ -828,6 +830,34 @@ class ExcelValidationListExporterTest(TestCase):
 
 
 class UploadHardeningTest(TestCase):
+    @patch("household_validation.services.GroupIndividual.objects.filter")
+    def test_group_individual_lookup_uses_exported_individual_id(
+        self,
+        filter_mock,
+    ):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            id="membership-1",
+            individual_id="individual-1",
+            group=group,
+        )
+        queryset = MagicMock()
+        queryset.select_related.return_value.first.return_value = group_individual
+        filter_mock.return_value = queryset
+
+        result = HouseholdValidationUploadService()._group_individual(
+            "individual-1",
+            group=group,
+        )
+
+        self.assertIs(result, group_individual)
+        filter_mock.assert_called_once_with(
+            individual_id="individual-1",
+            group=group,
+            is_deleted=False,
+        )
+        queryset.select_related.assert_called_once_with("individual")
+
     def test_json_safe_converts_nested_dates_to_iso_strings(self):
         raw_row = {
             "member_dob": date(1963, 10, 21),
