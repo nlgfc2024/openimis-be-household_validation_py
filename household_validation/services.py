@@ -1,8 +1,10 @@
+import json
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
 from django.core.exceptions import ValidationError
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -45,6 +47,11 @@ def _local_date(value):
     the guard used in ``core.services.userServices``.
     """
     return timezone.localtime(value).date() if timezone.is_aware(value) else value.date()
+
+
+def _json_safe(value):
+    """Return a JSON-native copy suitable for storage in a JSONField."""
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
 
 
 class HouseholdValidationUploadService:
@@ -223,7 +230,7 @@ class HouseholdValidationUploadService:
             validation_date=uploaded_row.validation_date,
             status=status,
             error_message=error_message,
-            raw_row=uploaded_row.values,
+            raw_row=_json_safe(uploaded_row.values),
             json_ext={
                 "participant": uploaded_row.participant,
                 "project_name": uploaded_row.project_name,

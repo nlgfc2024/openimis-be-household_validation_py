@@ -51,6 +51,7 @@ from household_validation.selection import (
 )
 from household_validation.services import (
     EligibleHouseholdSelectionService,
+    _json_safe,
     _local_date,
 )
 from household_validation.upload import (
@@ -827,6 +828,22 @@ class ExcelValidationListExporterTest(TestCase):
 
 
 class UploadHardeningTest(TestCase):
+    def test_json_safe_converts_nested_dates_to_iso_strings(self):
+        raw_row = {
+            "member_dob": date(1963, 10, 21),
+            "validation": {
+                "validation_date": date(2026, 7, 29),
+            },
+        }
+
+        serialized = _json_safe(raw_row)
+
+        self.assertEqual(serialized["member_dob"], "1963-10-21")
+        self.assertEqual(
+            serialized["validation"]["validation_date"],
+            "2026-07-29",
+        )
+
     def test_build_validation_json_ext_persists_not_verified_status(self):
         uploaded_row = UploadedValidationRow(
             row_number=2,
