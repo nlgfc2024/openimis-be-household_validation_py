@@ -7,25 +7,34 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 
 YES_NO_FORMULA = '"YES,NO"'
-PARTICIPANT_FORMULA = '"YES,NO"'
+PRIMARY_WORKER_FORMULA = '"YES,NO"'
+
+LOCATION_COLUMN_TYPES = {
+    "District": "R",
+    "TA": "D",
+    "GVH": "W",
+    "Village": "V",
+}
+
 
 EXCEL_COLUMNS = [
     "batch_id",
     "row_type",
-    "district",
-    "TA",
-    "village",
-    "group_code",
+    *LOCATION_COLUMN_TYPES,
+    "form_number",
     "group_uuid",
     "member_uuid",
     "member_name",
+    "national_id",
     "member_gender",
     "member_dob",
     "member_age",
     "fit_for_work",
+    "relationship",
     "head",
+    "household_wealth_quintile",
     "current_recipient_type",
-    "participant",
+    "primary_worker",
     "verified",
     "validation_date",
     "project",
@@ -37,7 +46,7 @@ PROJECT_OPTIONS_SHEET = "Project Options"
 PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
 
 EDITABLE_COLUMNS = {
-    "participant",
+    "primary_worker",
     "verified",
     "validation_date",
     "project",
@@ -118,20 +127,24 @@ class ExcelValidationListExporter:
         return {
             "batch_id": str(self.batch_id),
             "row_type": selected_member.row_type,
-            "district": self._location_name(location, "D"),
-            "TA": self._location_name(location, "W"),
-            "village": self._location_name(location, "V"),
-            "group_code": household.code,
+            **{
+                column: self._location_name(location, location_type)
+                for column, location_type in LOCATION_COLUMN_TYPES.items()
+            },
+            "form_number": self._form_number(group, individual),
             "group_uuid": str(household.id),
             "member_uuid": str(member.id),
             "member_name": self._member_name(individual),
+            "national_id": self._national_id(individual),
             "member_gender": member.gender,
             "member_dob": member.dob,
             "member_age": member.age,
             "fit_for_work": "YES" if member.fit_for_work else "NO",
+            "relationship": self._relationship(member.role),
             "head": "YES" if self._is_head(member) else "NO",
+            "household_wealth_quintile": household.wealth_quintile,
             "current_recipient_type": member.recipient_type,
-            "participant": None,
+            "primary_worker": None,
             "verified": None,
             "validation_date": None,
             "project": None,
@@ -141,13 +154,13 @@ class ExcelValidationListExporter:
 
     def _apply_validation(self, worksheet):
         max_row = max(worksheet.max_row, 2)
-        participant_col = self._column_letter("participant")
+        primary_worker_col = self._column_letter("primary_worker")
         verified_col = self._column_letter("verified")
         project_col = self._column_letter("project")
 
-        participant_validation = DataValidation(
+        primary_worker_validation = DataValidation(
             type="list",
-            formula1=PARTICIPANT_FORMULA,
+            formula1=PRIMARY_WORKER_FORMULA,
             allow_blank=True,
         )
         verified_validation = DataValidation(
@@ -156,9 +169,11 @@ class ExcelValidationListExporter:
             allow_blank=True,
         )
 
-        worksheet.add_data_validation(participant_validation)
+        worksheet.add_data_validation(primary_worker_validation)
         worksheet.add_data_validation(verified_validation)
-        participant_validation.add(f"{participant_col}2:{participant_col}{max_row}")
+        primary_worker_validation.add(
+            f"{primary_worker_col}2:{primary_worker_col}{max_row}"
+        )
         verified_validation.add(f"{verified_col}2:{verified_col}{max_row}")
 
         project_count = len([project for project in self.projects if self._project_name(project)])
@@ -203,6 +218,21 @@ class ExcelValidationListExporter:
         first_name = getattr(individual, "first_name", "") or ""
         last_name = getattr(individual, "last_name", "") or ""
         return f"{first_name} {last_name}".strip()
+
+    def _national_id(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("national_id")
+
+    def _form_number(self, group, individual):
+        group_json_ext = getattr(group, "json_ext", None) or {}
+        individual_json_ext = getattr(individual, "json_ext", None) or {}
+        return group_json_ext.get("form_number") or individual_json_ext.get("form_number")
+
+    def _relationship(self, role):
+        if role is None:
+            return None
+        return str(role).strip() or None
 
     def _is_head(self, member):
         return str(member.role or "").upper() == "HEAD"

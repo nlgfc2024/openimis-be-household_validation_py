@@ -13,6 +13,7 @@ from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService
 from project_social_protection.models import Project
 
+from household_validation.excel import LOCATION_COLUMN_TYPES
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
@@ -277,16 +278,8 @@ class HouseholdValidationUploadService:
 
         if uploaded_row.values.get("row_type") not in ("MAIN", "RESERVE"):
             errors.append(f"Row {row_number}: row_type is invalid")
-        if self._normalize(uploaded_row.values.get("group_code")) != self._normalize(group.code):
-            errors.append(f"Row {row_number}: group_code does not match the household")
-
         location = getattr(group, "location", None)
-        location_checks = (
-            ("district", "D"),
-            ("TA", "W"),
-            ("village", "V"),
-        )
-        for column, location_type in location_checks:
+        for column, location_type in LOCATION_COLUMN_TYPES.items():
             uploaded_value = self._normalize(uploaded_row.values.get(column))
             database_value = self._normalize(self._location_name(location, location_type))
             if uploaded_value and database_value and uploaded_value != database_value:
@@ -296,6 +289,7 @@ class HouseholdValidationUploadService:
                 member_structural_errors(
                     uploaded_row,
                     group_individual=group_individual,
+                    group=group,
                 )
             )
         return errors

@@ -19,7 +19,7 @@ VALIDATION_STATUS_VERIFIED = "VERIFIED"
 VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 
 EDITABLE_UPLOAD_COLUMNS = {
-    "participant",
+    "primary_worker",
     "verified",
     "validation_date",
     "project",
@@ -81,7 +81,7 @@ def parse_validation_workbook(file_or_bytes):
             continue
         row_errors = _validate_structural_values(row_number, values)
         verified = _parse_yes_no(values.get("verified"))
-        participant = _parse_yes_no(values.get("participant")) is True
+        participant = _parse_yes_no(values.get("primary_worker")) is True
         validation_date = _parse_date(values.get("validation_date"))
         project_label = _clean(values.get("project"))
         project_name = _resolve_project_name(project_label, project_options)
@@ -94,8 +94,10 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(f"Row {row_number}: project_id cannot be set without project")
         if values.get("verified") not in (None, "") and verified is None:
             row_errors.append(f"Row {row_number}: verified must be YES or NO")
-        if values.get("participant") not in (None, "") and _parse_yes_no(values.get("participant")) is None:
-            row_errors.append(f"Row {row_number}: participant must be YES or NO")
+        if values.get("primary_worker") not in (None, "") and _parse_yes_no(
+            values.get("primary_worker")
+        ) is None:
+            row_errors.append(f"Row {row_number}: primary_worker must be YES or NO")
         if values.get("validation_date") and validation_date is None:
             row_errors.append(f"Row {row_number}: validation_date is invalid")
         if project_label and not project_id:
@@ -250,24 +252,37 @@ def build_validation_json_ext(uploaded_row, project, upload_date, uploaded_at, u
     }
 
 
-def member_structural_errors(uploaded_row, group_individual):
+def member_structural_errors(uploaded_row, group_individual, group=None):
     errors = []
     row_number = uploaded_row.row_number
     individual = getattr(group_individual, "individual", None)
     individual_json_ext = getattr(individual, "json_ext", None) or {}
+    group = group or getattr(group_individual, "group", None)
 
     expected = {
+        "form_number": _form_number(group, individual),
         "member_name": _member_name(individual),
+        "national_id": individual_json_ext.get("national_id"),
         "member_gender": individual_json_ext.get("gender"),
         "member_dob": _date_value(getattr(individual, "dob", None)),
         "member_age": _age(getattr(individual, "dob", None)),
         "fit_for_work": "YES" if _truthy(individual_json_ext.get("fit_for_work")) else "NO",
+        "relationship": _relationship(getattr(group_individual, "role", None)),
         "head": "YES" if str(getattr(group_individual, "role", "")).upper() == "HEAD" else "NO",
+        "household_wealth_quintile": _household_wealth_quintile(group),
         "current_recipient_type": getattr(group_individual, "recipient_type", None),
+    }
+    strict_columns = {
+        "form_number",
+        "national_id",
+        "relationship",
+        "household_wealth_quintile",
     }
     for column, expected_value in expected.items():
         uploaded_value = uploaded_row.values.get(column)
-        if uploaded_value in (None, "") or expected_value in (None, ""):
+        if expected_value in (None, ""):
+            continue
+        if column not in strict_columns and uploaded_value in (None, ""):
             continue
         if _normalize(uploaded_value) != _normalize(expected_value):
             errors.append(f"Row {row_number}: {column} does not match the household member")
@@ -282,7 +297,7 @@ def build_validation_error_report_csv(batch_id, rows):
             "batch_id",
             "row_number",
             "status",
-            "group_code",
+            "form_number",
             "group_uuid",
             "member_uuid",
             "error_message",
@@ -295,7 +310,7 @@ def build_validation_error_report_csv(batch_id, rows):
                 str(batch_id),
                 row.row_number,
                 row.status,
-                raw_row.get("group_code"),
+                raw_row.get("form_number"),
                 raw_row.get("group_uuid"),
                 raw_row.get("member_uuid"),
                 row.error_message,
@@ -308,6 +323,37 @@ def _member_name(individual):
     if individual is None:
         return None
     return f"{getattr(individual, 'first_name', '') or ''} {getattr(individual, 'last_name', '') or ''}".strip()
+
+
+def _relationship(role):
+    if role is None:
+        return None
+    return str(role).strip() or None
+
+
+def _form_number(group, individual):
+    group_json_ext = getattr(group, "json_ext", None) or {}
+    individual_json_ext = getattr(individual, "json_ext", None) or {}
+    return group_json_ext.get("form_number") or individual_json_ext.get("form_number")
+
+
+def _household_wealth_quintile(group):
+    if group is None:
+        return None
+    group_json_ext = getattr(group, "json_ext", None) or {}
+    if group_json_ext.get("household_wealth_quintile") is not None:
+        return group_json_ext.get("household_wealth_quintile")
+
+    group_individuals = getattr(group, "groupindividuals", None)
+    if group_individuals is None:
+        return None
+    members = group_individuals.all()
+    for member in members:
+        individual = getattr(member, "individual", None)
+        individual_json_ext = getattr(individual, "json_ext", None) or {}
+        if individual_json_ext.get("household_wealth_quintile") is not None:
+            return individual_json_ext.get("household_wealth_quintile")
+    return None
 
 
 def _date_value(value):

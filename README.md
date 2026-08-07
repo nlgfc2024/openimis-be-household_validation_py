@@ -323,7 +323,7 @@ Expected upload behavior:
 
 - `verified = YES` stores `validation_status = VERIFIED` on `Group.Json_ext`.
 - `verified = NO` stores `validation_status = NOT_VERIFIED` on `Group.Json_ext`.
-- `participant = YES` updates the selected `GroupIndividual.recipient_type` to `PRIMARY`.
+- `primary_worker = YES` updates the selected `GroupIndividual.recipient_type` to `PRIMARY`.
 - Project selection is stored as validation intent/prospect metadata only.
 - Upload does not create `GroupBeneficiaryProjectEnrollment` records.
 - Protected workbook fields such as household/member identifiers, location labels, member details, fit-for-work, head, and current recipient values are checked for tampering.
