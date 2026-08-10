@@ -38,6 +38,7 @@ from household_validation.upload import (
     member_structural_errors,
     parse_validation_workbook,
 )
+from household_validation.wealth import get_household_wealth_quintile
 
 
 def _local_date(value):
@@ -58,8 +59,10 @@ def _json_safe(value):
 class HouseholdValidationUploadService:
     def __init__(self, user=None):
         self.user = user
+        self._group_cache = {}
 
     def upload(self, file_or_bytes, dry_run=False, source_file_name=None):
+        self._group_cache = {}
         parsed = parse_validation_workbook(file_or_bytes)
         totals = {
             "rows_read": parsed.rows_read,
@@ -142,7 +145,13 @@ class HouseholdValidationUploadService:
         if group is None:
             errors.append(f"Row {uploaded_row.row_number}: group was not found")
         else:
-            errors.extend(self._structural_errors(uploaded_row, group))
+            errors.extend(
+                self._structural_errors(
+                    uploaded_row,
+                    group,
+                    group_individual=group_individual,
+                )
+            )
         if group_individual is None:
             errors.append(f"Row {uploaded_row.row_number}: member was not found in group")
         if uploaded_row.project_id and project is None:
@@ -249,12 +258,35 @@ class HouseholdValidationUploadService:
             return None
 
     def _group(self, group_id):
+        cache_key = str(group_id)
+        if cache_key in self._group_cache:
+            return self._group_cache[cache_key]
         try:
-            return Group.objects.filter(id=group_id).select_related("location").first()
+            group = (
+                Group.objects.filter(id=group_id)
+                .select_related("location")
+                .prefetch_related("groupindividuals__individual")
+                .first()
+            )
         except (ValueError, ValidationError):
-            return None
+            group = None
+        self._group_cache[cache_key] = group
+        return group
 
     def _group_individual(self, individual_id, group):
+        prefetched_members = getattr(
+            group,
+            "_prefetched_objects_cache",
+            {},
+        ).get("groupindividuals")
+        if prefetched_members is not None:
+            for group_individual in prefetched_members:
+                if (
+                    str(group_individual.individual_id) == str(individual_id)
+                    and not group_individual.is_deleted
+                ):
+                    return group_individual
+            return None
         try:
             return (
                 GroupIndividual.objects.filter(
@@ -268,13 +300,9 @@ class HouseholdValidationUploadService:
         except (ValueError, ValidationError):
             return None
 
-    def _structural_errors(self, uploaded_row, group):
+    def _structural_errors(self, uploaded_row, group, group_individual=None):
         errors = []
         row_number = uploaded_row.row_number
-        group_individual = self._group_individual(
-            uploaded_row.values.get("member_uuid"),
-            group=group,
-        )
 
         if uploaded_row.values.get("row_type") not in ("MAIN", "RESERVE"):
             errors.append(f"Row {row_number}: row_type is invalid")
@@ -630,7 +658,10 @@ class EligibleHouseholdSelectionService:
             return None
 
         head = self._find_head(group, groupindividuals)
-        wealth_quintile = self._get_wealth_quintile(group, head, eligible_members)
+        wealth_quintile = get_household_wealth_quintile(
+            group,
+            group_individuals=groupindividuals,
+        )
 
         group_json_ext = group.json_ext or {}
 
@@ -675,21 +706,6 @@ class EligibleHouseholdSelectionService:
         if individual is None:
             return False
         return is_truthy((individual.json_ext or {}).get("fit_for_work"))
-
-    def _get_wealth_quintile(self, group, head, eligible_members):
-        group_json_ext = group.json_ext or {}
-        if group_json_ext.get("household_wealth_quintile") is not None:
-            return group_json_ext.get("household_wealth_quintile")
-        if head and head.source:
-            head_json_ext = head.source.individual.json_ext or {}
-            if head_json_ext.get("household_wealth_quintile") is not None:
-                return head_json_ext.get("household_wealth_quintile")
-        for member in eligible_members:
-            if member.source:
-                member_json_ext = member.source.individual.json_ext or {}
-                if member_json_ext.get("household_wealth_quintile") is not None:
-                    return member_json_ext.get("household_wealth_quintile")
-        return None
 
     def _parse_date(self, value):
         if isinstance(value, date):

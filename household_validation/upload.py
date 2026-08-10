@@ -11,6 +11,8 @@ from household_validation.excel import (
     PROJECT_OPTIONS_SHEET,
     PROJECT_OPTIONS_HEADERS,
 )
+from household_validation.identity import get_household_form_number
+from household_validation.wealth import get_household_wealth_quintile
 
 
 VALIDATION_LIST_SHEET = "Validation List"
@@ -260,7 +262,7 @@ def member_structural_errors(uploaded_row, group_individual, group=None):
     group = group or getattr(group_individual, "group", None)
 
     expected = {
-        "form_number": _form_number(group, individual),
+        "form_number": get_household_form_number(group, individual),
         "member_name": _member_name(individual),
         "national_id": individual_json_ext.get("national_id"),
         "member_gender": individual_json_ext.get("gender"),
@@ -269,7 +271,7 @@ def member_structural_errors(uploaded_row, group_individual, group=None):
         "fit_for_work": "YES" if _truthy(individual_json_ext.get("fit_for_work")) else "NO",
         "relationship": _relationship(getattr(group_individual, "role", None)),
         "head": "YES" if str(getattr(group_individual, "role", "")).upper() == "HEAD" else "NO",
-        "household_wealth_quintile": _household_wealth_quintile(group),
+        "household_wealth_quintile": get_household_wealth_quintile(group),
         "current_recipient_type": getattr(group_individual, "recipient_type", None),
     }
     strict_columns = {
@@ -331,31 +333,6 @@ def _relationship(role):
     return str(role).strip() or None
 
 
-def _form_number(group, individual):
-    group_json_ext = getattr(group, "json_ext", None) or {}
-    individual_json_ext = getattr(individual, "json_ext", None) or {}
-    return group_json_ext.get("form_number") or individual_json_ext.get("form_number")
-
-
-def _household_wealth_quintile(group):
-    if group is None:
-        return None
-    group_json_ext = getattr(group, "json_ext", None) or {}
-    if group_json_ext.get("household_wealth_quintile") is not None:
-        return group_json_ext.get("household_wealth_quintile")
-
-    group_individuals = getattr(group, "groupindividuals", None)
-    if group_individuals is None:
-        return None
-    members = group_individuals.all()
-    for member in members:
-        individual = getattr(member, "individual", None)
-        individual_json_ext = getattr(individual, "json_ext", None) or {}
-        if individual_json_ext.get("household_wealth_quintile") is not None:
-            return individual_json_ext.get("household_wealth_quintile")
-    return None
-
-
 def _date_value(value):
     if isinstance(value, date):
         return value.isoformat()
@@ -386,5 +363,7 @@ def _normalize(value):
         return None
     if isinstance(value, date):
         value = value.isoformat()
+    elif isinstance(value, float) and value.is_integer():
+        value = int(value)
     value = str(value).strip().casefold()
     return value or None

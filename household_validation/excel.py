@@ -5,6 +5,8 @@ from openpyxl.styles import Font, PatternFill, Protection
 from openpyxl.utils import get_column_letter
 from openpyxl.worksheet.datavalidation import DataValidation
 
+from household_validation.identity import get_household_form_number
+
 
 YES_NO_FORMULA = '"YES,NO"'
 PRIMARY_WORKER_FORMULA = '"YES,NO"'
@@ -53,6 +55,11 @@ EDITABLE_COLUMNS = {
     "validation_notes",
 }
 
+TEXT_COLUMNS = {
+    "form_number",
+    "national_id",
+}
+
 
 class ExcelValidationListExporter:
     def __init__(self, selection_result, batch_id, projects=None):
@@ -97,11 +104,16 @@ class ExcelValidationListExporter:
         for row_number, selected_member in enumerate(self.selection_result.member_rows, start=2):
             values = self._build_row(selected_member)
             for column_number, title in enumerate(EXCEL_COLUMNS, start=1):
+                value = values.get(title)
+                if title in TEXT_COLUMNS and value is not None:
+                    value = str(value)
                 cell = worksheet.cell(
                     row=row_number,
                     column=column_number,
-                    value=values.get(title),
+                    value=value,
                 )
+                if title in TEXT_COLUMNS:
+                    cell.number_format = "@"
                 cell.protection = Protection(locked=title not in EDITABLE_COLUMNS)
 
     def _write_project_options(self, workbook):
@@ -131,7 +143,7 @@ class ExcelValidationListExporter:
                 column: self._location_name(location, location_type)
                 for column, location_type in LOCATION_COLUMN_TYPES.items()
             },
-            "form_number": self._form_number(group, individual),
+            "form_number": get_household_form_number(group, individual),
             "group_uuid": str(household.id),
             "member_uuid": str(member.id),
             "member_name": self._member_name(individual),
@@ -223,11 +235,6 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("national_id")
-
-    def _form_number(self, group, individual):
-        group_json_ext = getattr(group, "json_ext", None) or {}
-        individual_json_ext = getattr(individual, "json_ext", None) or {}
-        return group_json_ext.get("form_number") or individual_json_ext.get("form_number")
 
     def _relationship(self, role):
         if role is None:
