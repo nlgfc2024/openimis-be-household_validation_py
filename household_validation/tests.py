@@ -1371,6 +1371,25 @@ class UploadHardeningTest(TestCase):
         self.assertIn("batch_id,row_number,status,form_number,group_uuid,member_uuid,error_message", report)
         self.assertIn("batch-1,2,ERROR,FORM-001,group-1,member-1,form_number does not match", report)
 
+    def test_error_report_uses_legacy_group_code_as_form_number(self):
+        row = SimpleNamespace(
+            row_number=2,
+            status="ERROR",
+            raw_row={
+                "group_code": "LEGACY-001",
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+            },
+            error_message="legacy upload error",
+        )
+
+        report = build_validation_error_report_csv("batch-1", [row])
+
+        self.assertIn(
+            "batch-1,2,ERROR,LEGACY-001,group-1,member-1,legacy upload error",
+            report,
+        )
+
 
 class LocalDateTests(TestCase):
     """openIMIS runs with USE_TZ = False, so timezone.now() is naive.

@@ -312,7 +312,7 @@ def build_validation_error_report_csv(batch_id, rows):
                 str(batch_id),
                 row.row_number,
                 row.status,
-                raw_row.get("form_number"),
+                raw_row.get("form_number") or raw_row.get("group_code"),
                 raw_row.get("group_uuid"),
                 raw_row.get("member_uuid"),
                 row.error_message,
