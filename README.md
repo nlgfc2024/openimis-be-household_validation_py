@@ -31,12 +31,12 @@ The module provides the backend workflow for household validation:
 - Project lookup support in `household_validation/project_lookup.py`
 - Excel validation list export in `household_validation/excel.py`
 - Excel upload parsing and validation helpers in `household_validation/upload.py`
-- Service layer for selection, summary, preview, project lookup, upload/apply, participant update, and error report generation in `household_validation/services.py`
+- Service layer for selection, summary, preview, project lookup, upload/apply, primary-worker update, and error report generation in `household_validation/services.py`
 - GraphQL query and mutation surface in `household_validation/schema.py`, `household_validation/gql_queries.py`, and `household_validation/gql_mutations.py`
 - GraphQL permission helper in `household_validation/gql_permissions.py`
 - Focused backend tests in `household_validation/tests.py`
 
-The implemented MVP generates Excel validation workbooks, parses uploaded validation workbooks, stores household validation metadata on `Group.Json_ext`, updates selected participants through `GroupIndividualService`, tracks batch/row outcomes, exposes batch history and error reports through GraphQL, and assigns the required household validation rights to configured administrator and district roles.
+The implemented MVP generates Excel validation workbooks, parses uploaded validation workbooks, stores household validation metadata on `Group.Json_ext`, stores primary-worker flags on `GroupIndividual.Json_ext`, tracks batch/row outcomes, exposes batch history and error reports through GraphQL, and assigns the required household validation rights to configured administrator and district roles.
 
 The integration extension also implements the backend surface required by the validation-list frontend:
 
@@ -323,7 +323,7 @@ Expected upload behavior:
 
 - `verified = YES` stores `validation_status = VERIFIED` on `Group.Json_ext`.
 - `verified = NO` stores `validation_status = NOT_VERIFIED` on `Group.Json_ext`.
-- `participant = YES` updates the selected `GroupIndividual.recipient_type` to `PRIMARY`.
+- `primary_worker = YES/NO` stores the worker flag on `GroupIndividual.Json_ext` without changing `recipient_type`.
 - Project selection is stored as validation intent/prospect metadata only.
 - Upload does not create `GroupBeneficiaryProjectEnrollment` records.
 - Protected workbook fields such as household/member identifiers, location labels, member details, fit-for-work, head, and current recipient values are checked for tampering.
@@ -356,8 +356,8 @@ cd openimis-be_py/openIMIS
 Latest local result:
 
 ```text
-Found 38 test(s).
-Ran 38 tests.
+Found 54 test(s).
+Ran 54 tests.
 OK
 ```
 

@@ -43,6 +43,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
         district_code = graphene.String(required=False)
         ta_id = graphene.Int(required=False)
         ta_code = graphene.String(required=False)
+        ta_codes = graphene.List(graphene.String, required=False)
+        gvh_codes = graphene.List(graphene.String, required=False)
         village_id = graphene.Int(required=False)
         village_code = graphene.String(required=False)
         village_codes = graphene.List(graphene.String, required=False)
@@ -73,6 +75,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             district_code=data.get("district_code"),
             ta_id=data.get("ta_id"),
             ta_code=data.get("ta_code"),
+            ta_codes=data.get("ta_codes"),
+            gvh_codes=data.get("gvh_codes"),
             village_id=data.get("village_id"),
             village_code=data.get("village_code"),
             village_codes=data.get("village_codes"),
@@ -92,6 +96,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             location_code=(
                 data.get("village_code")
                 or next(iter(data.get("village_codes") or []), None)
+                or next(iter(data.get("gvh_codes") or []), None)
+                or next(iter(data.get("ta_codes") or []), None)
                 or data.get("ta_code")
                 or data.get("district_code")
                 or data.get("region_code")
@@ -115,6 +121,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
                 "catchment_id": data.get("catchment_id"),
                 "region_id": data.get("region_id"),
                 "region_code": data.get("region_code"),
+                "ta_codes": data.get("ta_codes") or [],
+                "gvh_codes": data.get("gvh_codes") or [],
                 "female_headed_percentage": data.get("female_headed_percentage"),
                 "youth_percentage": data.get("youth_percentage"),
                 "reserve_percentage": reserve_percentage,
