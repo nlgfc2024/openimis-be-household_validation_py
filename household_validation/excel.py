@@ -156,7 +156,7 @@ class ExcelValidationListExporter:
             "head": "YES" if self._is_head(member) else "NO",
             "household_wealth_quintile": household.wealth_quintile,
             "current_recipient_type": member.recipient_type,
-            "primary_worker": None,
+            "primary_worker": self._primary_worker(group_individual),
             "verified": None,
             "validation_date": None,
             "project": None,
@@ -235,6 +235,16 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("national_id")
+
+    def _primary_worker(self, group_individual):
+        primary_worker = (
+            getattr(group_individual, "json_ext", None) or {}
+        ).get("primary_worker")
+        if primary_worker is True:
+            return "YES"
+        if primary_worker is False:
+            return "NO"
+        return None
 
     def _relationship(self, role):
         if role is None:

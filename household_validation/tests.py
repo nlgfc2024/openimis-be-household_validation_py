@@ -2,7 +2,7 @@ from datetime import date, datetime, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, call, patch
 
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
@@ -587,7 +587,7 @@ class ValidationUploadParserTest(TestCase):
         self.assertEqual(parsed.rows_read, 1)
         self.assertEqual(parsed.rows[0].project_id, "project-1")
         self.assertEqual(parsed.rows[0].verified, True)
-        self.assertEqual(parsed.rows[0].participant, True)
+        self.assertEqual(parsed.rows[0].primary_worker, True)
         self.assertEqual(PROJECT_SELECTION_TYPE_INTENT, "INTENT")
 
     def test_parse_validation_workbook_reports_missing_required_columns(self):
@@ -601,6 +601,27 @@ class ValidationUploadParserTest(TestCase):
         self.assertEqual(parsed.rows, [])
         self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
         self.assertIn("member_uuid", parsed.errors[0])
+
+    def test_parse_validation_workbook_preserves_primary_worker_no_and_blank(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
+        worksheet.cell(row=2, column=primary_worker_column, value="NO")
+        worksheet.append(
+            [
+                "batch-1" if column == "batch_id"
+                else "group-2" if column == "group_uuid"
+                else "member-2" if column == "member_uuid"
+                else None
+                for column in EXCEL_COLUMNS
+            ]
+        )
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows[0].primary_worker, False)
+        self.assertIsNone(parsed.rows[1].primary_worker)
 
     def test_parse_validation_workbook_rejects_invalid_editable_values(self):
         workbook = self._upload_workbook()
@@ -837,6 +858,28 @@ class ExcelValidationListExporterTest(TestCase):
             self.assertEqual(cell.data_type, "s")
             self.assertEqual(cell.number_format, "@")
 
+    def test_export_workbook_writes_stored_primary_worker_values(self):
+        result = self._selection_result(member_count=3)
+        stored_values = (True, False, None)
+        for selected_member, stored_value in zip(
+            result.main[0].household.eligible_members,
+            stored_values,
+        ):
+            selected_member.source.json_ext = (
+                {"primary_worker": stored_value}
+                if stored_value is not None
+                else {}
+            )
+
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertEqual(self._value(worksheet, "primary_worker", 2), "YES")
+        self.assertEqual(self._value(worksheet, "primary_worker", 3), "NO")
+        self.assertIsNone(self._value(worksheet, "primary_worker", 4))
+
     def _selection_result(self, member_count=1):
         location = self._location_tree()
         group = SimpleNamespace(id="group-1", code="HH-001", location=location)
@@ -895,6 +938,48 @@ class ExcelValidationListExporterTest(TestCase):
 
 
 class UploadHardeningTest(TestCase):
+    @patch("household_validation.services.GroupIndividualService")
+    def test_primary_worker_update_preserves_json_and_recipient_type(
+        self,
+        service_class_mock,
+    ):
+        group_individual = SimpleNamespace(
+            id="membership-1",
+            group_id="group-1",
+            recipient_type="SECONDARY",
+            json_ext={"existing": "value"},
+        )
+
+        service = HouseholdValidationUploadService()
+        service._apply_primary_worker(group_individual, True)
+        service._apply_primary_worker(group_individual, False)
+
+        service_class_mock.return_value.update.assert_has_calls(
+            [
+                call(
+                    {
+                        "id": "membership-1",
+                        "group_id": "group-1",
+                        "json_ext": {
+                            "existing": "value",
+                            "primary_worker": True,
+                        },
+                    }
+                ),
+                call(
+                    {
+                        "id": "membership-1",
+                        "group_id": "group-1",
+                        "json_ext": {
+                            "existing": "value",
+                            "primary_worker": False,
+                        },
+                    }
+                ),
+            ]
+        )
+        self.assertEqual(group_individual.recipient_type, "SECONDARY")
+
     @patch("household_validation.services.Group.objects.filter")
     def test_group_lookup_prefetches_members_and_individuals(self, filter_mock):
         group = SimpleNamespace(id="group-1")
@@ -985,7 +1070,7 @@ class UploadHardeningTest(TestCase):
             row_number=2,
             values={},
             verified=False,
-            participant=False,
+            primary_worker=None,
             validation_date=date(2026, 7, 3),
             project_name="Road Works",
             project_id="project-1",
@@ -1042,7 +1127,7 @@ class UploadHardeningTest(TestCase):
                 "current_recipient_type": "SECONDARY",
             },
             verified=None,
-            participant=False,
+            primary_worker=None,
             validation_date=None,
             project_name=None,
             project_id=None,
@@ -1093,7 +1178,7 @@ class UploadHardeningTest(TestCase):
                 "household_wealth_quintile": "Poorest",
             },
             verified=None,
-            participant=False,
+            primary_worker=None,
             validation_date=None,
             project_name=None,
             project_id=None,
@@ -1140,7 +1225,7 @@ class UploadHardeningTest(TestCase):
                 "relationship": "HEAD",
             },
             verified=None,
-            participant=False,
+            primary_worker=None,
             validation_date=None,
             project_name=None,
             project_id=None,
@@ -1184,7 +1269,7 @@ class UploadHardeningTest(TestCase):
                 "household_wealth_quintile": "Poorer",
             },
             verified=None,
-            participant=False,
+            primary_worker=None,
             validation_date=None,
             project_name=None,
             project_id=None,

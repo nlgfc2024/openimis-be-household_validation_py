@@ -95,7 +95,7 @@ class HouseholdValidationUploadService:
                     totals["households_verified"] += 1
                 elif uploaded_row.verified is False:
                     totals["households_not_verified"] += 1
-                if uploaded_row.participant:
+                if uploaded_row.primary_worker is not None:
                     totals["participant_updates"] += 1
 
             batch.uploaded_at = uploaded_at
@@ -177,8 +177,11 @@ class HouseholdValidationUploadService:
                 upload_date=upload_date,
                 uploaded_at=uploaded_at,
             )
-        if uploaded_row.participant:
-            self._apply_participant(group_individual)
+        if uploaded_row.primary_worker is not None:
+            self._apply_primary_worker(
+                group_individual,
+                uploaded_row.primary_worker,
+            )
 
         self._save_batch_row(
             batch=batch,
@@ -188,7 +191,10 @@ class HouseholdValidationUploadService:
             project=project,
             status=(
                 HouseholdValidationBatchRow.Status.APPLIED
-                if uploaded_row.verified is not None or uploaded_row.participant
+                if (
+                    uploaded_row.verified is not None
+                    or uploaded_row.primary_worker is not None
+                )
                 else HouseholdValidationBatchRow.Status.SKIPPED
             ),
         )
@@ -208,14 +214,14 @@ class HouseholdValidationUploadService:
         group.json_ext = json_ext
         group.save(user=self.user)
 
-    def _apply_participant(self, group_individual):
+    def _apply_primary_worker(self, group_individual, primary_worker):
+        json_ext = dict(group_individual.json_ext or {})
+        json_ext["primary_worker"] = primary_worker
         GroupIndividualService(self.user).update(
             {
                 "id": group_individual.id,
                 "group_id": group_individual.group_id,
-                "individual_id": group_individual.individual_id,
-                "role": group_individual.role,
-                "recipient_type": GroupIndividual.RecipientType.PRIMARY,
+                "json_ext": json_ext,
             }
         )
 
@@ -242,7 +248,7 @@ class HouseholdValidationUploadService:
             error_message=error_message,
             raw_row=_json_safe(uploaded_row.values),
             json_ext={
-                "participant": uploaded_row.participant,
+                "primary_worker": uploaded_row.primary_worker,
                 "project_name": uploaded_row.project_name,
                 "validation_notes": uploaded_row.notes,
             },
@@ -439,6 +445,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -455,6 +463,8 @@ class EligibleHouseholdSelectionService:
             district_code=district_code,
             ta_id=ta_id,
             ta_code=ta_code,
+            ta_codes=ta_codes,
+            gvh_codes=gvh_codes,
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
@@ -476,6 +486,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -489,6 +501,8 @@ class EligibleHouseholdSelectionService:
             district_code=district_code,
             ta_id=ta_id,
             ta_code=ta_code,
+            ta_codes=ta_codes,
+            gvh_codes=gvh_codes,
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
@@ -509,6 +523,8 @@ class EligibleHouseholdSelectionService:
             district_code=filters.get("district_code"),
             ta_id=filters.get("ta_id"),
             ta_code=filters.get("ta_code"),
+            ta_codes=filters.get("ta_codes"),
+            gvh_codes=filters.get("gvh_codes"),
             village_id=filters.get("village_id"),
             village_code=filters.get("village_code"),
             village_codes=filters.get("village_codes"),
@@ -587,6 +603,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -605,12 +623,31 @@ class EligibleHouseholdSelectionService:
                 village_filter |= Q(location__code__in=codes)
             return queryset.filter(village_filter)
 
-        if ta_id or ta_code:
+        selected_gvh_codes = list(dict.fromkeys(gvh_codes or []))
+        if selected_gvh_codes:
+            return queryset.filter(
+                Q(location__code__in=selected_gvh_codes)
+                | Q(location__parent__code__in=selected_gvh_codes)
+            )
+
+        selected_ta_codes = list(dict.fromkeys(ta_codes or []))
+        if ta_code:
+            selected_ta_codes.append(ta_code)
+
+        if ta_id or selected_ta_codes:
             ta_filter = Q()
             if ta_id:
-                ta_filter |= Q(location_id=ta_id) | Q(location__parent_id=ta_id)
-            if ta_code:
-                ta_filter |= Q(location__code=ta_code) | Q(location__parent__code=ta_code)
+                ta_filter |= (
+                    Q(location_id=ta_id)
+                    | Q(location__parent_id=ta_id)
+                    | Q(location__parent__parent_id=ta_id)
+                )
+            if selected_ta_codes:
+                ta_filter |= (
+                    Q(location__code__in=selected_ta_codes)
+                    | Q(location__parent__code__in=selected_ta_codes)
+                    | Q(location__parent__parent__code__in=selected_ta_codes)
+                )
             return queryset.filter(ta_filter)
 
         if district_id or district_code:
@@ -620,12 +657,14 @@ class EligibleHouseholdSelectionService:
                     Q(location_id=district_id)
                     | Q(location__parent_id=district_id)
                     | Q(location__parent__parent_id=district_id)
+                    | Q(location__parent__parent__parent_id=district_id)
                 )
             if district_code:
                 district_filter |= (
                     Q(location__code=district_code)
                     | Q(location__parent__code=district_code)
                     | Q(location__parent__parent__code=district_code)
+                    | Q(location__parent__parent__parent__code=district_code)
                 )
             return queryset.filter(district_filter)
         if region_id or region_code:

@@ -40,7 +40,7 @@ class UploadedValidationRow:
     row_number: int
     values: dict
     verified: bool | None
-    participant: bool
+    primary_worker: bool | None
     validation_date: date | None
     project_name: str | None
     project_id: str | None
@@ -83,7 +83,7 @@ def parse_validation_workbook(file_or_bytes):
             continue
         row_errors = _validate_structural_values(row_number, values)
         verified = _parse_yes_no(values.get("verified"))
-        participant = _parse_yes_no(values.get("primary_worker")) is True
+        primary_worker = _parse_yes_no(values.get("primary_worker"))
         validation_date = _parse_date(values.get("validation_date"))
         project_label = _clean(values.get("project"))
         project_name = _resolve_project_name(project_label, project_options)
@@ -112,7 +112,7 @@ def parse_validation_workbook(file_or_bytes):
                 row_number=row_number,
                 values=values,
                 verified=verified,
-                participant=participant,
+                primary_worker=primary_worker,
                 validation_date=validation_date,
                 project_name=project_name,
                 project_id=project_id,
