@@ -156,16 +156,34 @@ def exclude_recently_verified(households, exclude_verified_after=None):
     ]
 
 
-def _normalize_percentage(value, default):
+def _configured_percentage(attr_name, default):
+    from household_validation.apps import HouseholdValidationConfig
+
+    value = getattr(HouseholdValidationConfig, attr_name, None)
     if value is None:
         return default
-    value = max(0, min(int(value), 100))
-    return value / 100
+    try:
+        value = int(value)
+    except (TypeError, ValueError):
+        return default
+    return max(0, min(value, 100))
 
 
-def _allocate_quotas(target_count, female_headed_percentage=None, youth_percentage=None):
-    female_weight = _normalize_percentage(female_headed_percentage, 0.4)
-    youth_weight = _normalize_percentage(youth_percentage, 0.4)
+def female_headed_percentage():
+    return _configured_percentage("gql_mutation_female_headed_percentage", 40)
+
+
+def youth_percentage():
+    return _configured_percentage("gql_mutation_youth_percentage", 40)
+
+
+def reserve_percentage():
+    return _configured_percentage("gql_mutation_reserve_percentage", 20)
+
+
+def _allocate_quotas(target_count):
+    female_weight = female_headed_percentage() / 100
+    youth_weight = youth_percentage() / 100
     if female_weight + youth_weight > 1:
         total = female_weight + youth_weight
         female_weight = female_weight / total
@@ -192,9 +210,6 @@ def _allocate_quotas(target_count, female_headed_percentage=None, youth_percenta
 def select_households(
     households,
     target_count=None,
-    female_headed_percentage=None,
-    youth_percentage=None,
-    reserve_percentage=10,
     exclude_verified_after=None,
 ):
     eligible = [
@@ -206,11 +221,7 @@ def select_households(
 
     main_target = len(eligible) if target_count is None else target_count
     main_target = max(0, min(main_target, len(eligible)))
-    quotas = _allocate_quotas(
-        main_target,
-        female_headed_percentage=female_headed_percentage,
-        youth_percentage=youth_percentage,
-    )
+    quotas = _allocate_quotas(main_target)
 
     by_category = {
         CATEGORY_FEMALE_HEADED: [],
@@ -255,7 +266,7 @@ def select_households(
             if len(main) >= main_target:
                 break
 
-    reserve_target = math.ceil(main_target * reserve_percentage / 100)
+    reserve_target = math.ceil(main_target * reserve_percentage() / 100)
     reserve_target = max(0, min(reserve_target, len(eligible) - len(selected_ids)))
 
     reserve = []

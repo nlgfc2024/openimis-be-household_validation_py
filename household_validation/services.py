@@ -452,9 +452,6 @@ class EligibleHouseholdSelectionService:
         village_codes=None,
         exclude_verified_after=None,
         target_count=None,
-        female_headed_percentage=None,
-        youth_percentage=None,
-        reserve_percentage=10,
     ):
         candidates = self.candidates(
             region_id=region_id,
@@ -472,9 +469,6 @@ class EligibleHouseholdSelectionService:
         return select_households(
             candidates,
             target_count=target_count,
-            female_headed_percentage=female_headed_percentage,
-            youth_percentage=youth_percentage,
-            reserve_percentage=reserve_percentage,
             exclude_verified_after=exclude_verified_after,
         )
 
@@ -543,13 +537,6 @@ class EligibleHouseholdSelectionService:
         selection_result = select_households(
             candidates,
             target_count=filters.get("target_count"),
-            female_headed_percentage=filters.get("female_headed_percentage"),
-            youth_percentage=filters.get("youth_percentage"),
-            reserve_percentage=(
-                10
-                if filters.get("reserve_percentage") is None
-                else filters.get("reserve_percentage")
-            ),
             exclude_verified_after=filters.get("exclude_verified_after"),
         )
         main_rows = [
