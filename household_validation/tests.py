@@ -1,9 +1,11 @@
-from datetime import date
+from datetime import date, datetime, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
+from unittest.mock import MagicMock, call, patch
 
-from openpyxl import Workbook
+from django.utils import timezone
+from openpyxl import Workbook, load_workbook
 
 from household_validation.apps import (
     DEFAULT_CONFIG,
@@ -48,7 +50,12 @@ from household_validation.selection import (
     is_truthy,
     select_households,
 )
-from household_validation.services import EligibleHouseholdSelectionService
+from household_validation.services import (
+    EligibleHouseholdSelectionService,
+    HouseholdValidationUploadService,
+    _json_safe,
+    _local_date,
+)
 from household_validation.upload import (
     PROJECT_SELECTION_TYPE_INTENT,
     UploadedValidationRow,
@@ -59,6 +66,7 @@ from household_validation.upload import (
     member_structural_errors,
     parse_validation_workbook,
 )
+from household_validation.wealth import get_household_wealth_quintile
 
 
 class HouseholdValidationConfigTest(TestCase):
@@ -568,10 +576,10 @@ class ValidationUploadParserTest(TestCase):
         worksheet = workbook[VALIDATION_LIST_SHEET]
         project_column = EXCEL_COLUMNS.index("project") + 1
         verified_column = EXCEL_COLUMNS.index("verified") + 1
-        participant_column = EXCEL_COLUMNS.index("participant") + 1
+        primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
         worksheet.cell(row=2, column=project_column, value="Road Works")
         worksheet.cell(row=2, column=verified_column, value="YES")
-        worksheet.cell(row=2, column=participant_column, value="YES")
+        worksheet.cell(row=2, column=primary_worker_column, value="YES")
 
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
@@ -579,7 +587,7 @@ class ValidationUploadParserTest(TestCase):
         self.assertEqual(parsed.rows_read, 1)
         self.assertEqual(parsed.rows[0].project_id, "project-1")
         self.assertEqual(parsed.rows[0].verified, True)
-        self.assertEqual(parsed.rows[0].participant, True)
+        self.assertEqual(parsed.rows[0].primary_worker, True)
         self.assertEqual(PROJECT_SELECTION_TYPE_INTENT, "INTENT")
 
     def test_parse_validation_workbook_reports_missing_required_columns(self):
@@ -594,21 +602,42 @@ class ValidationUploadParserTest(TestCase):
         self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
         self.assertIn("member_uuid", parsed.errors[0])
 
+    def test_parse_validation_workbook_preserves_primary_worker_no_and_blank(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
+        worksheet.cell(row=2, column=primary_worker_column, value="NO")
+        worksheet.append(
+            [
+                "batch-1" if column == "batch_id"
+                else "group-2" if column == "group_uuid"
+                else "member-2" if column == "member_uuid"
+                else None
+                for column in EXCEL_COLUMNS
+            ]
+        )
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows[0].primary_worker, False)
+        self.assertIsNone(parsed.rows[1].primary_worker)
+
     def test_parse_validation_workbook_rejects_invalid_editable_values(self):
         workbook = self._upload_workbook()
         worksheet = workbook[VALIDATION_LIST_SHEET]
         verified_column = EXCEL_COLUMNS.index("verified") + 1
-        participant_column = EXCEL_COLUMNS.index("participant") + 1
+        primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
         date_column = EXCEL_COLUMNS.index("validation_date") + 1
         worksheet.cell(row=2, column=verified_column, value="MAYBE")
-        worksheet.cell(row=2, column=participant_column, value="LATER")
+        worksheet.cell(row=2, column=primary_worker_column, value="LATER")
         worksheet.cell(row=2, column=date_column, value="not-a-date")
 
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
         self.assertEqual(parsed.rows, [])
         self.assertIn("Row 2: verified must be YES or NO", parsed.errors)
-        self.assertIn("Row 2: participant must be YES or NO", parsed.errors)
+        self.assertIn("Row 2: primary_worker must be YES or NO", parsed.errors)
         self.assertIn("Row 2: validation_date is invalid", parsed.errors)
 
     def test_parse_validation_workbook_rejects_unknown_project_names(self):
@@ -673,9 +702,10 @@ class ValidationUploadParserTest(TestCase):
                 "batch_id": "batch-1",
                 "group_uuid": "group-1",
                 "member_uuid": "member-1",
-                "district": "District",
+                "District": "District",
                 "TA": "Traditional Authority",
-                "village": "Village",
+                "GVH": "Group Village Head",
+                "Village": "Village",
             }
         )
         worksheet.append([values[column] for column in EXCEL_COLUMNS])
@@ -701,18 +731,43 @@ class ExcelValidationListExporterTest(TestCase):
             [worksheet.cell(row=1, column=index).value for index in range(1, len(EXCEL_COLUMNS) + 1)],
             EXCEL_COLUMNS,
         )
+        self.assertIn("primary_worker", EXCEL_COLUMNS)
+        self.assertNotIn("participant", EXCEL_COLUMNS)
+        self.assertNotIn("group_code", EXCEL_COLUMNS)
         self.assertEqual(worksheet["A2"].value, "batch-1")
         self.assertEqual(worksheet["B2"].value, ROW_TYPE_MAIN)
-        self.assertEqual(worksheet["C2"].value, "District")
-        self.assertEqual(worksheet["D2"].value, "Traditional Authority")
-        self.assertEqual(worksheet["E2"].value, "Village")
-        self.assertEqual(worksheet["F2"].value, "HH-001")
-        self.assertEqual(worksheet["G2"].value, "group-1")
-        self.assertEqual(worksheet["H2"].value, "member-1")
-        self.assertEqual(worksheet["I2"].value, "Ada Worker")
-        self.assertEqual(worksheet["M2"].value, "YES")
-        self.assertEqual(worksheet["N2"].value, "YES")
-        self.assertEqual(worksheet["O2"].value, "PRIMARY")
+        self.assertEqual(self._value(worksheet, "District"), "District")
+        self.assertEqual(self._value(worksheet, "TA"), "Traditional Authority")
+        self.assertEqual(self._value(worksheet, "GVH"), "Group Village Head")
+        self.assertEqual(self._value(worksheet, "Village"), "Village")
+        self.assertEqual(self._value(worksheet, "form_number"), "FORM-001")
+        self.assertEqual(self._value(worksheet, "group_uuid"), "group-1")
+        self.assertEqual(self._value(worksheet, "member_uuid"), "member-1")
+        self.assertEqual(self._value(worksheet, "member_name"), "Ada Worker")
+        self.assertEqual(self._value(worksheet, "national_id"), "NAT-001")
+        self.assertEqual(self._value(worksheet, "fit_for_work"), "YES")
+        self.assertEqual(self._value(worksheet, "relationship"), "HEAD")
+        self.assertEqual(self._value(worksheet, "head"), "YES")
+        self.assertEqual(
+            self._value(worksheet, "household_wealth_quintile"),
+            "Poorest",
+        )
+        self.assertEqual(self._value(worksheet, "current_recipient_type"), "PRIMARY")
+
+        group = result.main[0].household.source
+        self.assertEqual(group.code, "HH-001")
+
+    def test_export_workbook_writes_exact_relationship_roles(self):
+        workbook = ExcelValidationListExporter(
+            self._selection_result(member_count=3),
+            batch_id="batch-1",
+        ).export_workbook()
+        worksheet = workbook["Validation List"]
+        relationship_column = EXCEL_COLUMNS.index("relationship") + 1
+
+        self.assertEqual(worksheet.cell(2, relationship_column).value, "HEAD")
+        self.assertEqual(worksheet.cell(3, relationship_column).value, "SPOUSE")
+        self.assertEqual(worksheet.cell(4, relationship_column).value, "SON")
 
     def test_export_workbook_has_hidden_project_id_and_dropdowns(self):
         result = self._selection_result()
@@ -761,10 +816,15 @@ class ExcelValidationListExporterTest(TestCase):
         worksheet = workbook["Validation List"]
 
         self.assertTrue(worksheet.protection.sheet)
-        self.assertTrue(worksheet["G2"].protection.locked)
-        self.assertFalse(worksheet["P2"].protection.locked)
-        self.assertFalse(worksheet["Q2"].protection.locked)
-        self.assertFalse(worksheet["U2"].protection.locked)
+        for column in (
+            "group_uuid",
+            "national_id",
+            "relationship",
+            "household_wealth_quintile",
+        ):
+            self.assertTrue(self._cell(worksheet, column).protection.locked)
+        for column in ("primary_worker", "verified", "validation_notes"):
+            self.assertFalse(self._cell(worksheet, column).protection.locked)
 
     def test_export_workbook_writes_one_row_per_selected_eligible_member(self):
         result = self._selection_result(member_count=2)
@@ -773,8 +833,52 @@ class ExcelValidationListExporterTest(TestCase):
         worksheet = workbook["Validation List"]
 
         self.assertEqual(worksheet.max_row, 3)
-        self.assertEqual(worksheet["H2"].value, "member-1")
-        self.assertEqual(worksheet["H3"].value, "member-2")
+        self.assertEqual(self._value(worksheet, "member_uuid", 2), "member-1")
+        self.assertEqual(self._value(worksheet, "member_uuid", 3), "member-2")
+
+    def test_export_workbook_preserves_identifier_columns_as_text(self):
+        result = self._selection_result()
+        member = result.main[0].household.eligible_members[0]
+        individual = member.source.individual
+        individual.json_ext["form_number"] = "001234"
+        individual.json_ext["national_id"] = "00123456"
+
+        exported = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_bytes()
+        worksheet = load_workbook(BytesIO(exported))["Validation List"]
+
+        for column, expected in (
+            ("form_number", "001234"),
+            ("national_id", "00123456"),
+        ):
+            cell = self._cell(worksheet, column)
+            self.assertEqual(cell.value, expected)
+            self.assertEqual(cell.data_type, "s")
+            self.assertEqual(cell.number_format, "@")
+
+    def test_export_workbook_writes_stored_primary_worker_values(self):
+        result = self._selection_result(member_count=3)
+        stored_values = (True, False, None)
+        for selected_member, stored_value in zip(
+            result.main[0].household.eligible_members,
+            stored_values,
+        ):
+            selected_member.source.json_ext = (
+                {"primary_worker": stored_value}
+                if stored_value is not None
+                else {}
+            )
+
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertEqual(self._value(worksheet, "primary_worker", 2), "YES")
+        self.assertEqual(self._value(worksheet, "primary_worker", 3), "NO")
+        self.assertIsNone(self._value(worksheet, "primary_worker", 4))
 
     def _selection_result(self, member_count=1):
         location = self._location_tree()
@@ -784,6 +888,10 @@ class ExcelValidationListExporterTest(TestCase):
             individual = SimpleNamespace(
                 first_name="Ada" if index == 1 else "Grace",
                 last_name="Worker",
+                json_ext={
+                    "form_number": "FORM-001",
+                    "national_id": f"NAT-{index:03d}",
+                },
             )
             group_individual = SimpleNamespace(individual=individual)
             selected_members.append(
@@ -792,7 +900,7 @@ class ExcelValidationListExporterTest(TestCase):
                     gender="Female",
                     dob=date(1990, 1, index),
                     fit_for_work=True,
-                    role="HEAD" if index == 1 else None,
+                    role=("HEAD" if index == 1 else "SPOUSE" if index == 2 else "SON"),
                     recipient_type="PRIMARY" if index == 1 else None,
                     source=group_individual,
                 )
@@ -816,19 +924,153 @@ class ExcelValidationListExporterTest(TestCase):
             reserve=[],
         )
 
+    def _cell(self, worksheet, column_name, row_number=2):
+        return worksheet.cell(row_number, EXCEL_COLUMNS.index(column_name) + 1)
+
+    def _value(self, worksheet, column_name, row_number=2):
+        return self._cell(worksheet, column_name, row_number).value
+
     def _location_tree(self):
-        district = SimpleNamespace(type="D", name="District", code="D01", parent=None)
-        ta = SimpleNamespace(type="W", name="Traditional Authority", code="TA01", parent=district)
-        return SimpleNamespace(type="V", name="Village", code="V01", parent=ta)
+        district = SimpleNamespace(type="R", name="District", code="D01", parent=None)
+        ta = SimpleNamespace(type="D", name="Traditional Authority", code="TA01", parent=district)
+        gvh = SimpleNamespace(type="W", name="Group Village Head", code="GVH01", parent=ta)
+        return SimpleNamespace(type="V", name="Village", code="V01", parent=gvh)
 
 
 class UploadHardeningTest(TestCase):
+    @patch("household_validation.services.GroupIndividualService")
+    def test_primary_worker_update_preserves_json_and_recipient_type(
+        self,
+        service_class_mock,
+    ):
+        group_individual = SimpleNamespace(
+            id="membership-1",
+            group_id="group-1",
+            recipient_type="SECONDARY",
+            json_ext={"existing": "value"},
+        )
+
+        service = HouseholdValidationUploadService()
+        service._apply_primary_worker(group_individual, True)
+        service._apply_primary_worker(group_individual, False)
+
+        service_class_mock.return_value.update.assert_has_calls(
+            [
+                call(
+                    {
+                        "id": "membership-1",
+                        "group_id": "group-1",
+                        "json_ext": {
+                            "existing": "value",
+                            "primary_worker": True,
+                        },
+                    }
+                ),
+                call(
+                    {
+                        "id": "membership-1",
+                        "group_id": "group-1",
+                        "json_ext": {
+                            "existing": "value",
+                            "primary_worker": False,
+                        },
+                    }
+                ),
+            ]
+        )
+        self.assertEqual(group_individual.recipient_type, "SECONDARY")
+
+    @patch("household_validation.services.Group.objects.filter")
+    def test_group_lookup_prefetches_members_and_individuals(self, filter_mock):
+        group = SimpleNamespace(id="group-1")
+        filtered_queryset = MagicMock()
+        location_queryset = MagicMock()
+        prefetched_queryset = MagicMock()
+        filter_mock.return_value = filtered_queryset
+        filtered_queryset.select_related.return_value = location_queryset
+        location_queryset.prefetch_related.return_value = prefetched_queryset
+        prefetched_queryset.first.return_value = group
+
+        service = HouseholdValidationUploadService()
+        result = service._group("group-1")
+        cached_result = service._group("group-1")
+
+        self.assertIs(result, group)
+        self.assertIs(cached_result, group)
+        filter_mock.assert_called_once_with(id="group-1")
+        filtered_queryset.select_related.assert_called_once_with("location")
+        location_queryset.prefetch_related.assert_called_once_with(
+            "groupindividuals__individual"
+        )
+
+    def test_group_individual_lookup_reuses_prefetched_members(self):
+        member = SimpleNamespace(
+            individual_id="individual-1",
+            is_deleted=False,
+        )
+        group = SimpleNamespace(
+            _prefetched_objects_cache={"groupindividuals": [member]},
+        )
+        service = HouseholdValidationUploadService()
+
+        with patch(
+            "household_validation.services.GroupIndividual.objects.filter"
+        ) as filter_mock:
+            result = service._group_individual("individual-1", group)
+
+        self.assertIs(result, member)
+        filter_mock.assert_not_called()
+
+    @patch("household_validation.services.GroupIndividual.objects.filter")
+    def test_group_individual_lookup_uses_exported_individual_id(
+        self,
+        filter_mock,
+    ):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            id="membership-1",
+            individual_id="individual-1",
+            group=group,
+        )
+        queryset = MagicMock()
+        queryset.select_related.return_value.first.return_value = group_individual
+        filter_mock.return_value = queryset
+
+        result = HouseholdValidationUploadService()._group_individual(
+            "individual-1",
+            group=group,
+        )
+
+        self.assertIs(result, group_individual)
+        filter_mock.assert_called_once_with(
+            individual_id="individual-1",
+            group=group,
+            is_deleted=False,
+        )
+        queryset.select_related.assert_called_once_with("individual")
+
+    def test_json_safe_converts_nested_dates_to_iso_strings(self):
+        raw_row = {
+            "member_dob": date(1963, 10, 21),
+            "validation": {
+                "validation_date": date(2026, 7, 29),
+            },
+        }
+
+        serialized = _json_safe(raw_row)
+
+        self.assertEqual(serialized["member_dob"], "1963-10-21")
+        self.assertEqual(
+            serialized["validation"]["validation_date"],
+            "2026-07-29",
+        )
+
     def test_build_validation_json_ext_persists_not_verified_status(self):
         uploaded_row = UploadedValidationRow(
             row_number=2,
             values={},
             verified=False,
-            participant=False,
+            primary_worker=None,
             validation_date=date(2026, 7, 3),
             project_name="Road Works",
             project_id="project-1",
@@ -848,9 +1090,16 @@ class UploadHardeningTest(TestCase):
         self.assertEqual(json_ext["validation_project_selection_type"], PROJECT_SELECTION_TYPE_INTENT)
 
     def test_member_structural_errors_detect_protected_field_tampering(self):
+        group = SimpleNamespace(
+            json_ext={
+                "form_number": "FORM-001",
+                "household_wealth_quintile": "Poorest",
+            },
+        )
         group_individual = SimpleNamespace(
             role="HEAD",
             recipient_type="PRIMARY",
+            group=group,
             individual=SimpleNamespace(
                 first_name="Ada",
                 last_name="Worker",
@@ -858,22 +1107,27 @@ class UploadHardeningTest(TestCase):
                 json_ext={
                     "gender": "Female",
                     "fit_for_work": True,
+                    "national_id": "NAT-001",
                 },
             ),
         )
         uploaded_row = UploadedValidationRow(
             row_number=2,
             values={
+                "form_number": "FORM-999",
                 "member_name": "Grace Worker",
+                "national_id": "NAT-999",
                 "member_gender": "Male",
                 "member_dob": "1991-01-01",
                 "member_age": "18",
                 "fit_for_work": "NO",
+                "relationship": "SPOUSE",
                 "head": "NO",
+                "household_wealth_quintile": "Richest",
                 "current_recipient_type": "SECONDARY",
             },
             verified=None,
-            participant=False,
+            primary_worker=None,
             validation_date=None,
             project_name=None,
             project_id=None,
@@ -882,10 +1136,216 @@ class UploadHardeningTest(TestCase):
 
         errors = member_structural_errors(uploaded_row, group_individual)
 
+        self.assertIn("Row 2: form_number does not match the household member", errors)
         self.assertIn("Row 2: member_name does not match the household member", errors)
+        self.assertIn("Row 2: national_id does not match the household member", errors)
         self.assertIn("Row 2: member_gender does not match the household member", errors)
         self.assertIn("Row 2: fit_for_work does not match the household member", errors)
+        self.assertIn("Row 2: relationship does not match the household member", errors)
+        self.assertIn(
+            "Row 2: household_wealth_quintile does not match the household member",
+            errors,
+        )
         self.assertIn("Row 2: current_recipient_type does not match the household member", errors)
+
+    def test_structural_errors_accept_integer_like_excel_ids(self):
+        group = SimpleNamespace(
+            json_ext={
+                "form_number": "123456",
+                "household_wealth_quintile": "Poorest",
+            },
+        )
+        group_individual = SimpleNamespace(
+            role="HEAD",
+            recipient_type=None,
+            group=group,
+            individual=SimpleNamespace(
+                first_name="Ada",
+                last_name="Worker",
+                dob=None,
+                json_ext={
+                    "fit_for_work": True,
+                    "national_id": "123456",
+                },
+            ),
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "form_number": 123456.0,
+                "national_id": 123456.0,
+                "relationship": "HEAD",
+                "household_wealth_quintile": "Poorest",
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+
+        errors = member_structural_errors(uploaded_row, group_individual)
+
+        self.assertNotIn(
+            "Row 2: form_number does not match the household member",
+            errors,
+        )
+        self.assertNotIn(
+            "Row 2: national_id does not match the household member",
+            errors,
+        )
+
+    def test_form_number_maps_to_group_without_using_group_code(self):
+        group = SimpleNamespace(
+            code="INTERNAL-GROUP-CODE",
+            json_ext={},
+        )
+        group_individual = SimpleNamespace(
+            role="HEAD",
+            recipient_type=None,
+            group=group,
+            individual=SimpleNamespace(
+                first_name="Ada",
+                last_name="Worker",
+                dob=None,
+                json_ext={
+                    "fit_for_work": True,
+                    "form_number": "FORM-001",
+                    "national_id": "NAT-001",
+                },
+            ),
+        )
+        group.groupindividuals = _FakeRelatedManager([group_individual])
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "form_number": "FORM-001",
+                "national_id": "NAT-001",
+                "relationship": "HEAD",
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+
+        errors = member_structural_errors(
+            uploaded_row,
+            group_individual,
+            group=group,
+        )
+
+        self.assertNotIn(
+            "Row 2: form_number does not match the household member",
+            errors,
+        )
+        self.assertEqual(group.code, "INTERNAL-GROUP-CODE")
+
+    def test_upload_wealth_validation_uses_head_before_first_member(self):
+        other_member = self._wealth_member(
+            "other",
+            role="SPOUSE",
+            fit_for_work=True,
+            wealth_quintile="Richest",
+        )
+        head = self._wealth_member(
+            "head",
+            role="HEAD",
+            fit_for_work=True,
+            wealth_quintile="Poorer",
+        )
+        group = SimpleNamespace(
+            json_ext={},
+            groupindividuals=_FakeRelatedManager([other_member, head]),
+        )
+        other_member.group = group
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "relationship": "SPOUSE",
+                "household_wealth_quintile": "Poorer",
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+
+        errors = member_structural_errors(uploaded_row, other_member)
+
+        self.assertNotIn(
+            "Row 2: household_wealth_quintile does not match "
+            "the household member",
+            errors,
+        )
+
+    def test_wealth_resolver_ignores_members_who_are_not_fit_for_work(self):
+        ineligible_member = self._wealth_member(
+            "ineligible",
+            role="SPOUSE",
+            fit_for_work=False,
+            wealth_quintile="Richest",
+        )
+        eligible_member = self._wealth_member(
+            "eligible",
+            role="SON",
+            fit_for_work=True,
+            wealth_quintile="Middle",
+        )
+        group = SimpleNamespace(
+            json_ext={},
+            groupindividuals=_FakeRelatedManager(
+                [ineligible_member, eligible_member]
+            ),
+        )
+
+        self.assertEqual(get_household_wealth_quintile(group), "Middle")
+
+    def test_export_selection_uses_shared_wealth_precedence(self):
+        other_member = self._wealth_member(
+            "other",
+            role="SPOUSE",
+            fit_for_work=True,
+            wealth_quintile="Richest",
+        )
+        head = self._wealth_member(
+            "head",
+            role="HEAD",
+            fit_for_work=True,
+            wealth_quintile="Poorest",
+        )
+        group = SimpleNamespace(
+            id="group-1",
+            code="HH-001",
+            json_ext={},
+            groupindividuals=_FakeRelatedManager([other_member, head]),
+        )
+
+        household = EligibleHouseholdSelectionService()._build_household(group)
+
+        self.assertEqual(household.wealth_quintile, "Poorest")
+
+    def _wealth_member(self, member_id, role, fit_for_work, wealth_quintile):
+        individual = SimpleNamespace(
+            id=f"individual-{member_id}",
+            dob=date(1990, 1, 1),
+            json_ext={
+                "fit_for_work": fit_for_work,
+                "household_wealth_quintile": wealth_quintile,
+            },
+        )
+        return SimpleNamespace(
+            id=f"membership-{member_id}",
+            individual_id=individual.id,
+            individual=individual,
+            role=role,
+            recipient_type=None,
+        )
 
     def test_build_validation_error_report_writes_error_rows_csv(self):
         batch = SimpleNamespace(
@@ -896,11 +1356,11 @@ class UploadHardeningTest(TestCase):
                         row_number=2,
                         status="ERROR",
                         raw_row={
-                            "group_code": "HH-001",
+                            "form_number": "FORM-001",
                             "group_uuid": "group-1",
                             "member_uuid": "member-1",
                         },
-                        error_message="group_code does not match",
+                        error_message="form_number does not match",
                     )
                 ]
             ),
@@ -908,8 +1368,45 @@ class UploadHardeningTest(TestCase):
 
         report = build_validation_error_report_csv(batch.id, batch.rows.order_by("row_number"))
 
-        self.assertIn("batch_id,row_number,status,group_code,group_uuid,member_uuid,error_message", report)
-        self.assertIn("batch-1,2,ERROR,HH-001,group-1,member-1,group_code does not match", report)
+        self.assertIn("batch_id,row_number,status,form_number,group_uuid,member_uuid,error_message", report)
+        self.assertIn("batch-1,2,ERROR,FORM-001,group-1,member-1,form_number does not match", report)
+
+    def test_error_report_uses_legacy_group_code_as_form_number(self):
+        row = SimpleNamespace(
+            row_number=2,
+            status="ERROR",
+            raw_row={
+                "group_code": "LEGACY-001",
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+            },
+            error_message="legacy upload error",
+        )
+
+        report = build_validation_error_report_csv("batch-1", [row])
+
+        self.assertIn(
+            "batch-1,2,ERROR,LEGACY-001,group-1,member-1,legacy upload error",
+            report,
+        )
+
+
+class LocalDateTests(TestCase):
+    """openIMIS runs with USE_TZ = False, so timezone.now() is naive.
+
+    Passing a naive datetime to timezone.localdate()/localtime() raises
+    ValueError("localtime() cannot be applied to a naive datetime"), which
+    previously aborted every non-dry-run validation-list upload.
+    """
+
+    def test_naive_datetime_returns_its_date(self):
+        naive = datetime(2026, 7, 29, 12, 27)
+        self.assertIsNone(naive.tzinfo)
+        self.assertEqual(_local_date(naive), date(2026, 7, 29))
+
+    def test_aware_datetime_is_converted_to_local_date(self):
+        aware = datetime(2026, 7, 29, 12, 27, tzinfo=datetime_timezone.utc)
+        self.assertEqual(_local_date(aware), timezone.localtime(aware).date())
 
 
 class _FakeRows:

@@ -1,8 +1,10 @@
+import json
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
 
 from django.core.exceptions import ValidationError
+from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
 from django.db.models import Q
 from django.utils import timezone
@@ -11,6 +13,7 @@ from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService
 from project_social_protection.models import Project
 
+from household_validation.excel import LOCATION_COLUMN_TYPES
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
@@ -35,13 +38,31 @@ from household_validation.upload import (
     member_structural_errors,
     parse_validation_workbook,
 )
+from household_validation.wealth import get_household_wealth_quintile
+
+
+def _local_date(value):
+    """Local date of ``value``, tolerating naive datetimes.
+
+    openIMIS runs with ``USE_TZ = False``, so ``timezone.now()`` is naive and
+    ``timezone.localdate()``/``timezone.localtime()`` raise ValueError. Mirrors
+    the guard used in ``core.services.userServices``.
+    """
+    return timezone.localtime(value).date() if timezone.is_aware(value) else value.date()
+
+
+def _json_safe(value):
+    """Return a JSON-native copy suitable for storage in a JSONField."""
+    return json.loads(json.dumps(value, cls=DjangoJSONEncoder))
 
 
 class HouseholdValidationUploadService:
     def __init__(self, user=None):
         self.user = user
+        self._group_cache = {}
 
     def upload(self, file_or_bytes, dry_run=False, source_file_name=None):
+        self._group_cache = {}
         parsed = parse_validation_workbook(file_or_bytes)
         totals = {
             "rows_read": parsed.rows_read,
@@ -55,8 +76,8 @@ class HouseholdValidationUploadService:
             return totals
 
         batch = self._get_or_create_batch(parsed, source_file_name=source_file_name)
-        upload_date = timezone.localdate()
         uploaded_at = timezone.now()
+        upload_date = _local_date(uploaded_at)
 
         with transaction.atomic():
             for uploaded_row in parsed.rows:
@@ -74,7 +95,7 @@ class HouseholdValidationUploadService:
                     totals["households_verified"] += 1
                 elif uploaded_row.verified is False:
                     totals["households_not_verified"] += 1
-                if uploaded_row.participant:
+                if uploaded_row.primary_worker is not None:
                     totals["participant_updates"] += 1
 
             batch.uploaded_at = uploaded_at
@@ -124,7 +145,13 @@ class HouseholdValidationUploadService:
         if group is None:
             errors.append(f"Row {uploaded_row.row_number}: group was not found")
         else:
-            errors.extend(self._structural_errors(uploaded_row, group))
+            errors.extend(
+                self._structural_errors(
+                    uploaded_row,
+                    group,
+                    group_individual=group_individual,
+                )
+            )
         if group_individual is None:
             errors.append(f"Row {uploaded_row.row_number}: member was not found in group")
         if uploaded_row.project_id and project is None:
@@ -150,8 +177,11 @@ class HouseholdValidationUploadService:
                 upload_date=upload_date,
                 uploaded_at=uploaded_at,
             )
-        if uploaded_row.participant:
-            self._apply_participant(group_individual)
+        if uploaded_row.primary_worker is not None:
+            self._apply_primary_worker(
+                group_individual,
+                uploaded_row.primary_worker,
+            )
 
         self._save_batch_row(
             batch=batch,
@@ -161,7 +191,10 @@ class HouseholdValidationUploadService:
             project=project,
             status=(
                 HouseholdValidationBatchRow.Status.APPLIED
-                if uploaded_row.verified is not None or uploaded_row.participant
+                if (
+                    uploaded_row.verified is not None
+                    or uploaded_row.primary_worker is not None
+                )
                 else HouseholdValidationBatchRow.Status.SKIPPED
             ),
         )
@@ -181,14 +214,14 @@ class HouseholdValidationUploadService:
         group.json_ext = json_ext
         group.save(user=self.user)
 
-    def _apply_participant(self, group_individual):
+    def _apply_primary_worker(self, group_individual, primary_worker):
+        json_ext = dict(group_individual.json_ext or {})
+        json_ext["primary_worker"] = primary_worker
         GroupIndividualService(self.user).update(
             {
                 "id": group_individual.id,
                 "group_id": group_individual.group_id,
-                "individual_id": group_individual.individual_id,
-                "role": group_individual.role,
-                "recipient_type": GroupIndividual.RecipientType.PRIMARY,
+                "json_ext": json_ext,
             }
         )
 
@@ -213,9 +246,9 @@ class HouseholdValidationUploadService:
             validation_date=uploaded_row.validation_date,
             status=status,
             error_message=error_message,
-            raw_row=uploaded_row.values,
+            raw_row=_json_safe(uploaded_row.values),
             json_ext={
-                "participant": uploaded_row.participant,
+                "primary_worker": uploaded_row.primary_worker,
                 "project_name": uploaded_row.project_name,
                 "validation_notes": uploaded_row.notes,
             },
@@ -231,16 +264,39 @@ class HouseholdValidationUploadService:
             return None
 
     def _group(self, group_id):
+        cache_key = str(group_id)
+        if cache_key in self._group_cache:
+            return self._group_cache[cache_key]
         try:
-            return Group.objects.filter(id=group_id).select_related("location").first()
+            group = (
+                Group.objects.filter(id=group_id)
+                .select_related("location")
+                .prefetch_related("groupindividuals__individual")
+                .first()
+            )
         except (ValueError, ValidationError):
-            return None
+            group = None
+        self._group_cache[cache_key] = group
+        return group
 
-    def _group_individual(self, group_individual_id, group):
+    def _group_individual(self, individual_id, group):
+        prefetched_members = getattr(
+            group,
+            "_prefetched_objects_cache",
+            {},
+        ).get("groupindividuals")
+        if prefetched_members is not None:
+            for group_individual in prefetched_members:
+                if (
+                    str(group_individual.individual_id) == str(individual_id)
+                    and not group_individual.is_deleted
+                ):
+                    return group_individual
+            return None
         try:
             return (
                 GroupIndividual.objects.filter(
-                    id=group_individual_id,
+                    individual_id=individual_id,
                     group=group,
                     is_deleted=False,
                 )
@@ -250,26 +306,14 @@ class HouseholdValidationUploadService:
         except (ValueError, ValidationError):
             return None
 
-    def _structural_errors(self, uploaded_row, group):
+    def _structural_errors(self, uploaded_row, group, group_individual=None):
         errors = []
         row_number = uploaded_row.row_number
-        group_individual = self._group_individual(
-            uploaded_row.values.get("member_uuid"),
-            group=group,
-        )
 
         if uploaded_row.values.get("row_type") not in ("MAIN", "RESERVE"):
             errors.append(f"Row {row_number}: row_type is invalid")
-        if self._normalize(uploaded_row.values.get("group_code")) != self._normalize(group.code):
-            errors.append(f"Row {row_number}: group_code does not match the household")
-
         location = getattr(group, "location", None)
-        location_checks = (
-            ("district", "D"),
-            ("TA", "W"),
-            ("village", "V"),
-        )
-        for column, location_type in location_checks:
+        for column, location_type in LOCATION_COLUMN_TYPES.items():
             uploaded_value = self._normalize(uploaded_row.values.get(column))
             database_value = self._normalize(self._location_name(location, location_type))
             if uploaded_value and database_value and uploaded_value != database_value:
@@ -279,6 +323,7 @@ class HouseholdValidationUploadService:
                 member_structural_errors(
                     uploaded_row,
                     group_individual=group_individual,
+                    group=group,
                 )
             )
         return errors
@@ -400,6 +445,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -416,6 +463,8 @@ class EligibleHouseholdSelectionService:
             district_code=district_code,
             ta_id=ta_id,
             ta_code=ta_code,
+            ta_codes=ta_codes,
+            gvh_codes=gvh_codes,
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
@@ -437,6 +486,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -450,6 +501,8 @@ class EligibleHouseholdSelectionService:
             district_code=district_code,
             ta_id=ta_id,
             ta_code=ta_code,
+            ta_codes=ta_codes,
+            gvh_codes=gvh_codes,
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
@@ -470,6 +523,8 @@ class EligibleHouseholdSelectionService:
             district_code=filters.get("district_code"),
             ta_id=filters.get("ta_id"),
             ta_code=filters.get("ta_code"),
+            ta_codes=filters.get("ta_codes"),
+            gvh_codes=filters.get("gvh_codes"),
             village_id=filters.get("village_id"),
             village_code=filters.get("village_code"),
             village_codes=filters.get("village_codes"),
@@ -548,6 +603,8 @@ class EligibleHouseholdSelectionService:
         district_code=None,
         ta_id=None,
         ta_code=None,
+        ta_codes=None,
+        gvh_codes=None,
         village_id=None,
         village_code=None,
         village_codes=None,
@@ -566,12 +623,31 @@ class EligibleHouseholdSelectionService:
                 village_filter |= Q(location__code__in=codes)
             return queryset.filter(village_filter)
 
-        if ta_id or ta_code:
+        selected_gvh_codes = list(dict.fromkeys(gvh_codes or []))
+        if selected_gvh_codes:
+            return queryset.filter(
+                Q(location__code__in=selected_gvh_codes)
+                | Q(location__parent__code__in=selected_gvh_codes)
+            )
+
+        selected_ta_codes = list(dict.fromkeys(ta_codes or []))
+        if ta_code:
+            selected_ta_codes.append(ta_code)
+
+        if ta_id or selected_ta_codes:
             ta_filter = Q()
             if ta_id:
-                ta_filter |= Q(location_id=ta_id) | Q(location__parent_id=ta_id)
-            if ta_code:
-                ta_filter |= Q(location__code=ta_code) | Q(location__parent__code=ta_code)
+                ta_filter |= (
+                    Q(location_id=ta_id)
+                    | Q(location__parent_id=ta_id)
+                    | Q(location__parent__parent_id=ta_id)
+                )
+            if selected_ta_codes:
+                ta_filter |= (
+                    Q(location__code__in=selected_ta_codes)
+                    | Q(location__parent__code__in=selected_ta_codes)
+                    | Q(location__parent__parent__code__in=selected_ta_codes)
+                )
             return queryset.filter(ta_filter)
 
         if district_id or district_code:
@@ -581,12 +657,14 @@ class EligibleHouseholdSelectionService:
                     Q(location_id=district_id)
                     | Q(location__parent_id=district_id)
                     | Q(location__parent__parent_id=district_id)
+                    | Q(location__parent__parent__parent_id=district_id)
                 )
             if district_code:
                 district_filter |= (
                     Q(location__code=district_code)
                     | Q(location__parent__code=district_code)
                     | Q(location__parent__parent__code=district_code)
+                    | Q(location__parent__parent__parent__code=district_code)
                 )
             return queryset.filter(district_filter)
         if region_id or region_code:
@@ -619,7 +697,10 @@ class EligibleHouseholdSelectionService:
             return None
 
         head = self._find_head(group, groupindividuals)
-        wealth_quintile = self._get_wealth_quintile(group, head, eligible_members)
+        wealth_quintile = get_household_wealth_quintile(
+            group,
+            group_individuals=groupindividuals,
+        )
 
         group_json_ext = group.json_ext or {}
 
@@ -664,21 +745,6 @@ class EligibleHouseholdSelectionService:
         if individual is None:
             return False
         return is_truthy((individual.json_ext or {}).get("fit_for_work"))
-
-    def _get_wealth_quintile(self, group, head, eligible_members):
-        group_json_ext = group.json_ext or {}
-        if group_json_ext.get("household_wealth_quintile") is not None:
-            return group_json_ext.get("household_wealth_quintile")
-        if head and head.source:
-            head_json_ext = head.source.individual.json_ext or {}
-            if head_json_ext.get("household_wealth_quintile") is not None:
-                return head_json_ext.get("household_wealth_quintile")
-        for member in eligible_members:
-            if member.source:
-                member_json_ext = member.source.individual.json_ext or {}
-                if member_json_ext.get("household_wealth_quintile") is not None:
-                    return member_json_ext.get("household_wealth_quintile")
-        return None
 
     def _parse_date(self, value):
         if isinstance(value, date):
