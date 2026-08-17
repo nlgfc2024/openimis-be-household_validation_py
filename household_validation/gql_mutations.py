@@ -8,6 +8,11 @@ from household_validation.apps import HouseholdValidationConfig
 from household_validation.excel import ExcelValidationListExporter
 from household_validation.gql_permissions import require_permissions
 from household_validation.models import HouseholdValidationBatch
+from household_validation.selection import (
+    female_headed_percentage,
+    reserve_percentage,
+    youth_percentage,
+)
 from household_validation.services import (
     EligibleHouseholdSelectionService,
     HouseholdValidationProjectLookupService,
@@ -54,9 +59,6 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
         catchment_code = graphene.String(required=False)
         exclude_verified_after = graphene.Date(required=False)
         target_count = graphene.Int(required=False)
-        female_headed_percentage = graphene.Int(required=False)
-        youth_percentage = graphene.Int(required=False)
-        reserve_percentage = graphene.Int(required=False)
 
     @classmethod
     def mutate(cls, root, info, **data):
@@ -64,10 +66,6 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             info.context.user,
             HouseholdValidationConfig.gql_mutation_generate_household_validation_list_perms,
         )
-        reserve_percentage = data.get("reserve_percentage")
-        if reserve_percentage is None:
-            reserve_percentage = 10
-
         selection_result = EligibleHouseholdSelectionService(info.context.user).select(
             region_id=data.get("region_id"),
             region_code=data.get("region_code"),
@@ -82,9 +80,6 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             village_codes=data.get("village_codes"),
             exclude_verified_after=data.get("exclude_verified_after"),
             target_count=data.get("target_count"),
-            female_headed_percentage=data.get("female_headed_percentage"),
-            youth_percentage=data.get("youth_percentage"),
-            reserve_percentage=reserve_percentage,
         )
         projects = HouseholdValidationProjectLookupService().list_projects(
             location_id=(
@@ -123,9 +118,9 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
                 "region_code": data.get("region_code"),
                 "ta_codes": data.get("ta_codes") or [],
                 "gvh_codes": data.get("gvh_codes") or [],
-                "female_headed_percentage": data.get("female_headed_percentage"),
-                "youth_percentage": data.get("youth_percentage"),
-                "reserve_percentage": reserve_percentage,
+                "female_headed_percentage": female_headed_percentage(),
+                "youth_percentage": youth_percentage(),
+                "reserve_percentage": reserve_percentage(),
                 "households_selected": len(selection_result.main),
                 "reserve_households": len(selection_result.reserve),
                 "member_rows": len(selection_result.member_rows),
