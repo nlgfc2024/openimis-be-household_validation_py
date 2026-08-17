@@ -17,6 +17,7 @@ from household_validation.services import (
     EligibleHouseholdSelectionService,
     HouseholdValidationProjectLookupService,
     HouseholdValidationUploadService,
+    _json_safe,
 )
 
 
@@ -24,9 +25,17 @@ class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
     batch_id = graphene.UUID()
     file_name = graphene.String()
     file_base64 = graphene.String()
-    households_selected = graphene.Int()
+    total_households = graphene.Int()
+    total_individuals = graphene.Int()
+    eligible_households = graphene.Int()
+    eligible_individuals = graphene.Int()
+    selected_households = graphene.Int()
+    selected_individuals = graphene.Int()
+    selected_female_headed_households = graphene.Int()
+    selected_youth_households = graphene.Int()
+    selected_other_households = graphene.Int()
     reserve_households = graphene.Int()
-    member_rows = graphene.Int()
+    generated_at = graphene.DateTime()
 
 
 class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
@@ -66,7 +75,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             info.context.user,
             HouseholdValidationConfig.gql_mutation_generate_household_validation_list_perms,
         )
-        selection_result = EligibleHouseholdSelectionService(info.context.user).select(
+        selection_result, summary = EligibleHouseholdSelectionService(info.context.user).generate(
             region_id=data.get("region_id"),
             region_code=data.get("region_code"),
             district_id=data.get("district_id"),
@@ -121,9 +130,8 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
                 "female_headed_percentage": female_headed_percentage(),
                 "youth_percentage": youth_percentage(),
                 "reserve_percentage": reserve_percentage(),
-                "households_selected": len(selection_result.main),
-                "reserve_households": len(selection_result.reserve),
                 "member_rows": len(selection_result.member_rows),
+                **_json_safe(summary),
             },
         )
         batch.save(user=info.context.user)
@@ -138,9 +146,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             batch_id=batch.id,
             file_name=file_name,
             file_base64=base64.b64encode(workbook_bytes).decode("ascii"),
-            households_selected=len(selection_result.main),
-            reserve_households=len(selection_result.reserve),
-            member_rows=len(selection_result.member_rows),
+            **summary,
         )
 
     @staticmethod

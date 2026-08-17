@@ -17,7 +17,6 @@ from household_validation.gql_queries import (
     HouseholdValidationPreviewGQLType,
     HouseholdValidationPreviewPageInfoGQLType,
     HouseholdValidationProjectsGQLType,
-    HouseholdValidationSummaryGQLType,
 )
 from household_validation.models import (
     HouseholdValidationBatch,
@@ -73,10 +72,6 @@ def validation_filter_args():
 
 
 class Query(graphene.ObjectType):
-    household_validation_summary = graphene.Field(
-        HouseholdValidationSummaryGQLType,
-        **validation_filter_args(),
-    )
     household_validation_preview = graphene.Field(
         HouseholdValidationPreviewGQLType,
         first=graphene.Argument(graphene.Int, required=False),
@@ -105,16 +100,6 @@ class Query(graphene.ObjectType):
         HouseholdValidationErrorReportGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
     )
-
-    def resolve_household_validation_summary(parent, info, **kwargs):
-        Query._check_permissions(
-            info.context.user,
-            HouseholdValidationConfig.gql_query_household_validation_rule_perms,
-        )
-        summary = EligibleHouseholdSelectionService(info.context.user).summary(
-            **Query._selection_filters(kwargs)
-        )
-        return HouseholdValidationSummaryGQLType(**summary)
 
     def resolve_household_validation_preview(parent, info, **kwargs):
         Query._check_permissions(

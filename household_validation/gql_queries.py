@@ -42,21 +42,6 @@ class HouseholdValidationBatchRowGQLType(graphene.ObjectType):
     json_ext = GenericScalar()
 
 
-class HouseholdValidationSummaryGQLType(graphene.ObjectType):
-    total_households = graphene.Int()
-    total_individuals = graphene.Int()
-    eligible_households = graphene.Int()
-    eligible_individuals = graphene.Int()
-    selected_households = graphene.Int()
-    selected_individuals = graphene.Int()
-    selected_female_headed_households = graphene.Int()
-    selected_youth_households = graphene.Int()
-    selected_other_households = graphene.Int()
-    reserve_households = graphene.Int()
-    main_households = graphene.Int()
-    generated_at = graphene.DateTime()
-
-
 class HouseholdValidationPreviewRowGQLType(graphene.ObjectType):
     row_type = graphene.String()
     category = graphene.String()
