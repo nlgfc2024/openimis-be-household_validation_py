@@ -69,6 +69,14 @@ The module configuration exposes these GraphQL permission keys:
 - `gql_query_household_validation_history_perms`
 - `gql_query_household_validation_error_report_perms`
 
+It also exposes the selection quota percentages used by `generateHouseholdValidationList` and `householdValidationPreview` (these are no longer accepted as GraphQL arguments; update `ModuleConfiguration` for the `household_validation` module to change them):
+
+- `gql_mutation_female_headed_percentage` (default `40`)
+- `gql_mutation_youth_percentage` (default `40`)
+- `gql_mutation_reserve_percentage` (default `20`)
+
+The remainder after the female-headed and youth quotas (default `20%`) is filled by the PMT/wealth-quintile-ranked "other" pool.
+
 ## GraphQL Backend Testing
 
 Test the backend through the GraphQL fields exposed in `household_validation/schema.py`. The frontend should use these same operations.
@@ -76,7 +84,6 @@ Test the backend through the GraphQL fields exposed in `household_validation/sch
 Available GraphQL fields:
 
 - `householdValidationProjects`
-- `householdValidationSummary`
 - `householdValidationPreview`
 - `householdValidationBatches`
 - `householdValidationBatchRows`
@@ -86,12 +93,12 @@ Available GraphQL fields:
 
 Required rights:
 
-- `958001`: project lookup, validation summary, preview, and validation list generation
+- `958001`: project lookup, preview, and validation list generation
 - `958002`: validation list upload/apply
 - `958003`: batch history and batch row queries
 - `958004`: validation upload error report download
 
-Summary, preview, and export should receive the same filter payload so they describe the same selected households:
+Preview and export should receive the same filter payload so they describe the same selected households:
 
 - `regionId` or `regionCode`
 - `districtId` or `districtCode`
@@ -99,11 +106,8 @@ Summary, preview, and export should receive the same filter payload so they desc
 - `villageId` or `villageCode`
 - `excludeVerifiedAfter`
 - `targetCount`
-- `femaleHeadedPercentage`
-- `youthPercentage`
-- `reservePercentage`
 
-`ta` maps to the municipality/TA level in the location hierarchy. Hotspot and public works catchment remain future-facing and are not used for current selection.
+`ta` maps to the municipality/TA level in the location hierarchy. Hotspot and public works catchment remain future-facing and are not used for current selection. Selection quota percentages (female-headed, youth, reserve) are no longer request arguments — they come from `ModuleConfiguration` (see above).
 
 Project dropdown query:
 
@@ -121,7 +125,7 @@ query {
 }
 ```
 
-Generate a validation workbook:
+Generate a validation workbook. The response embeds the same summary statistics that used to require a separate `householdValidationSummary` query, computed from the same selection run as the exported workbook:
 
 ```graphql
 mutation {
@@ -129,35 +133,10 @@ mutation {
     districtCode: "DISTRICT_CODE"
     excludeVerifiedAfter: "2026-07-01"
     targetCount: 100
-    reservePercentage: 10
   ) {
     batchId
     fileName
     fileBase64
-    householdsSelected
-    reserveHouseholds
-    memberRows
-  }
-}
-```
-
-The response `fileBase64` is the Excel workbook content. The frontend should decode it for download.
-
-Query summary statistics for the frontend cards:
-
-```graphql
-query {
-  householdValidationSummary(
-    regionCode: "REGION_CODE"
-    districtCode: "DISTRICT_CODE"
-    taCode: "TA_CODE"
-    villageCode: "VILLAGE_CODE"
-    excludeVerifiedAfter: "2026-07-01"
-    targetCount: 100
-    femaleHeadedPercentage: 40
-    youthPercentage: 40
-    reservePercentage: 10
-  ) {
     totalHouseholds
     totalIndividuals
     eligibleHouseholds
@@ -168,11 +147,12 @@ query {
     selectedYouthHouseholds
     selectedOtherHouseholds
     reserveHouseholds
-    mainHouseholds
     generatedAt
   }
 }
 ```
+
+The response `fileBase64` is the Excel workbook content. The frontend should decode it for download.
 
 These fields map to the validation-list summary cards:
 
@@ -197,9 +177,6 @@ query {
     villageCode: "VILLAGE_CODE"
     excludeVerifiedAfter: "2026-07-01"
     targetCount: 100
-    femaleHeadedPercentage: 40
-    youthPercentage: 40
-    reservePercentage: 10
   ) {
     totalCount
     pageInfo {
@@ -332,13 +309,12 @@ Expected upload behavior:
 
 Implemented and verified in the integration extension:
 
-- `householdValidationSummary` returns card statistics for the validation-list UI.
+- `generateHouseholdValidationList` returns card statistics for the validation-list UI inline on the same response as the exported workbook, so no separate summary query is needed.
 - `householdValidationPreview` returns paged preview rows for selected household/member rows.
-- `generateHouseholdValidationList` accepts the same region/location/quota filters used by summary and preview.
-- Summary, preview, and export share the same eligible-household selection service.
+- `generateHouseholdValidationList` and `householdValidationPreview` accept the same region/location filters.
+- Generation and preview share the same eligible-household selection service.
 - Region filtering is supported in addition to district/TA/village filtering.
-- Female-headed and youth quota percentages are configurable while preserving the default 40/40/20 behavior.
-- Reserve percentage remains configurable with a default of 10%.
+- Female-headed, youth, and reserve quota percentages are configured via `ModuleConfiguration` (default 40/40/20) rather than passed as request arguments.
 - Percentage over-allocation is normalized so selection cannot exceed the requested target.
 - Upload and export behavior still do not create enrollment records.
 
