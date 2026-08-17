@@ -191,7 +191,7 @@ class HouseholdSelectionTest(TestCase):
             _household("other", "Poorest"),
         ]
 
-        result = select_households(households, target_count=3)
+        result, _ = select_households(households, target_count=3)
 
         self.assertEqual([row.row_type for row in result.main], [ROW_TYPE_MAIN] * 3)
         self.assertEqual(
@@ -206,7 +206,7 @@ class HouseholdSelectionTest(TestCase):
             _household("youth", "Poorest", eligible_member_age=20),
         ]
 
-        result = select_households(households, target_count=1)
+        result, _ = select_households(households, target_count=1)
 
         self.assertEqual(result.main[0].household.id, "female-poorest")
 
@@ -216,7 +216,7 @@ class HouseholdSelectionTest(TestCase):
             _household("youth", "Poorer", eligible_member_age=20),
         ]
 
-        result = select_households(households)
+        result, _ = select_households(households)
 
         self.assertEqual(len(result.main), 2)
         self.assertEqual(result.reserve, [])
@@ -229,12 +229,15 @@ class HouseholdSelectionTest(TestCase):
         ]
 
         with patch.object(HouseholdValidationConfig, "gql_mutation_reserve_percentage", 50):
-            result = select_households(households, target_count=2)
+            result, summary = select_households(households, target_count=2)
 
         self.assertEqual(len(result.main), 2)
         self.assertEqual(len(result.reserve), 1)
         self.assertEqual(result.reserve[0].row_type, ROW_TYPE_RESERVE)
         self.assertEqual(result.reserve[0].household.id, "other")
+        self.assertEqual(summary["selected_households"], 2)
+        self.assertEqual(summary["selected_individuals"], 2)
+        self.assertEqual(summary["reserve_households"], 1)
 
     def test_select_households_adds_default_twenty_percent_reserve(self):
         households = [
@@ -242,7 +245,7 @@ class HouseholdSelectionTest(TestCase):
             for index in range(1, 21)
         ]
 
-        result = select_households(households, target_count=10)
+        result, _ = select_households(households, target_count=10)
 
         self.assertEqual(len(result.main), 10)
         self.assertEqual(len(result.reserve), 2)
@@ -262,7 +265,7 @@ class HouseholdSelectionTest(TestCase):
             ),
         ]
 
-        result = select_households(
+        result, _ = select_households(
             households,
             exclude_verified_after=date(2026, 6, 30),
         )
@@ -280,7 +283,7 @@ class HouseholdSelectionTest(TestCase):
             _household("worker", "Poorer"),
         ]
 
-        result = select_households(households)
+        result, _ = select_households(households)
 
         self.assertEqual([row.household.id for row in result.main], ["worker"])
 
@@ -291,13 +294,20 @@ class HouseholdSelectionTest(TestCase):
             _household("other-2", "Middle"),
         ]
 
-        result = select_households(households, target_count=3)
+        result, summary = select_households(households, target_count=3)
 
         self.assertEqual(len(result.main), 3)
         self.assertEqual(
             [row.household.id for row in result.main],
             ["female", "other-1", "other-2"],
         )
+        # "other-2" is only picked up by the backfill loop (there's no youth
+        # household to fill that quota slot), so the summary counts must
+        # reflect it too, not just the households chosen during quota-fill.
+        self.assertEqual(summary["selected_households"], 3)
+        self.assertEqual(summary["selected_female_headed_households"], 1)
+        self.assertEqual(summary["selected_youth_households"], 0)
+        self.assertEqual(summary["selected_other_households"], 2)
 
     def test_selection_result_expands_selected_households_to_member_rows(self):
         households = [
@@ -311,7 +321,7 @@ class HouseholdSelectionTest(TestCase):
             )
         ]
 
-        result = select_households(households)
+        result, _ = select_households(households)
 
         self.assertEqual(len(result.member_rows), 2)
         self.assertEqual(
@@ -330,7 +340,7 @@ class HouseholdSelectionTest(TestCase):
             _household("age-36", "Poorest", eligible_member_age=36),
         ]
 
-        result = select_households(households, target_count=3)
+        result, _ = select_households(households, target_count=3)
 
         categories = {
             row.household.id: row.category
@@ -357,7 +367,7 @@ class HouseholdSelectionTest(TestCase):
             patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 0),
             patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 100),
         ):
-            result = select_households(households, target_count=2)
+            result, _ = select_households(households, target_count=2)
 
         self.assertEqual(
             [row.category for row in result.main],
@@ -366,7 +376,7 @@ class HouseholdSelectionTest(TestCase):
 
 
 class HouseholdValidationPreviewServiceTest(TestCase):
-    def test_summary_and_preview_share_selection_result(self):
+    def test_generate_and_preview_share_selection_result(self):
         service = _FakeSelectionService(
             [
                 _fake_group("group-1", "HH-001", "Female", 30, "Poorest"),
@@ -378,7 +388,7 @@ class HouseholdValidationPreviewServiceTest(TestCase):
         filters = {
             "target_count": 2,
         }
-        summary = service.summary(**filters)
+        _, summary = service.generate(**filters)
         preview_rows = service.preview(**filters)
 
         self.assertEqual(summary["total_households"], 3)

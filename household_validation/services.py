@@ -23,12 +23,8 @@ from household_validation.project_lookup import (
     project_option_from_project,
 )
 from household_validation.selection import (
-    CATEGORY_FEMALE_HEADED,
-    CATEGORY_OTHER,
-    CATEGORY_YOUTH,
     EligibleHousehold,
     EligibleMember,
-    ROW_TYPE_MAIN,
     is_truthy,
     select_households,
 )
@@ -466,11 +462,12 @@ class EligibleHouseholdSelectionService:
             village_code=village_code,
             village_codes=village_codes,
         )
-        return select_households(
+        selection_result, _ = select_households(
             candidates,
             target_count=target_count,
             exclude_verified_after=exclude_verified_after,
         )
+        return selection_result
 
     def candidates(
         self,
@@ -507,7 +504,12 @@ class EligibleHouseholdSelectionService:
             if household is not None
         ]
 
-    def summary(self, **filters):
+    def generate(self, **filters):
+        """
+        The ``generateHouseholdValidationList`` mutation exposes both: the
+        ``SelectionResult`` to export the workbook, and the summary counts inline
+        on the same response, so callers get a single request/response.
+        """
         queryset = self._base_queryset()
         queryset = self._apply_location_filters(
             queryset,
@@ -525,46 +527,33 @@ class EligibleHouseholdSelectionService:
         )
         groups = list(queryset)
         total_households = len(groups)
-        total_individuals = sum(
-            len([member for member in group.groupindividuals.all() if not member.is_deleted])
-            for group in groups
-        )
-        candidates = [
-            household
-            for household in (self._build_household(group) for group in groups)
-            if household is not None
-        ]
-        selection_result = select_households(
+        total_individuals = 0
+        eligible_individuals = 0
+        candidates = []
+        for group in groups:
+            total_individuals += len(
+                [member for member in group.groupindividuals.all() if not member.is_deleted]
+            )
+            household = self._build_household(group)
+            if household is None:
+                continue
+            candidates.append(household)
+            eligible_individuals += len(household.eligible_members)
+
+        selection_result, selection_summary = select_households(
             candidates,
             target_count=filters.get("target_count"),
             exclude_verified_after=filters.get("exclude_verified_after"),
         )
-        main_rows = [
-            row
-            for row in selection_result.member_rows
-            if row.row_type == ROW_TYPE_MAIN
-        ]
-        category_counts = {
-            CATEGORY_FEMALE_HEADED: 0,
-            CATEGORY_YOUTH: 0,
-            CATEGORY_OTHER: 0,
-        }
-        for selected in selection_result.main:
-            category_counts[selected.category] += 1
-        return {
+        summary = {
             "total_households": total_households,
             "total_individuals": total_individuals,
             "eligible_households": len(candidates),
-            "eligible_individuals": sum(len(h.eligible_members) for h in candidates),
-            "selected_households": len(selection_result.main),
-            "selected_individuals": len(main_rows),
-            "selected_female_headed_households": category_counts[CATEGORY_FEMALE_HEADED],
-            "selected_youth_households": category_counts[CATEGORY_YOUTH],
-            "selected_other_households": category_counts[CATEGORY_OTHER],
-            "reserve_households": len(selection_result.reserve),
-            "main_households": len(selection_result.main),
+            "eligible_individuals": eligible_individuals,
+            **selection_summary,
             "generated_at": timezone.now(),
         }
+        return selection_result, summary
 
     def preview(self, **filters):
         selection_result = self.select(**filters)

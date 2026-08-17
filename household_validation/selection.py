@@ -1,6 +1,7 @@
 import math
 from dataclasses import dataclass, field
 from datetime import date
+from functools import cached_property
 from typing import Any
 
 
@@ -75,7 +76,7 @@ class SelectionResult:
     def selected(self) -> list[SelectedHousehold]:
         return [*self.main, *self.reserve]
 
-    @property
+    @cached_property
     def member_rows(self) -> list[SelectedMember]:
         return [
             SelectedMember(
@@ -236,19 +237,21 @@ def select_households(
 
     selected_ids = set()
     main = []
-    selected_category_counts = {
+    category_counts = {
         CATEGORY_FEMALE_HEADED: 0,
         CATEGORY_YOUTH: 0,
         CATEGORY_OTHER: 0,
     }
+    selected_individuals = 0
     for category in (CATEGORY_FEMALE_HEADED, CATEGORY_YOUTH, CATEGORY_OTHER):
         for household in by_category[category]:
             if len(main) >= main_target:
                 break
-            if selected_category_counts[category] >= quotas[category]:
+            if category_counts[category] >= quotas[category]:
                 break
             selected_ids.add(household.id)
-            selected_category_counts[category] += 1
+            category_counts[category] += 1
+            selected_individuals += len(household.eligible_members)
             main.append(SelectedHousehold(household, category, ROW_TYPE_MAIN))
 
     if len(main) < main_target:
@@ -256,13 +259,10 @@ def select_households(
             if household.id in selected_ids:
                 continue
             selected_ids.add(household.id)
-            main.append(
-                SelectedHousehold(
-                    household,
-                    household_categories[household.id],
-                    ROW_TYPE_MAIN,
-                )
-            )
+            category = household_categories[household.id]
+            category_counts[category] += 1
+            selected_individuals += len(household.eligible_members)
+            main.append(SelectedHousehold(household, category, ROW_TYPE_MAIN))
             if len(main) >= main_target:
                 break
 
@@ -284,4 +284,13 @@ def select_households(
         if len(reserve) >= reserve_target:
             break
 
-    return SelectionResult(main=main, reserve=reserve)
+    selection_result = SelectionResult(main=main, reserve=reserve)
+    summary = {
+        "selected_households": len(main),
+        "selected_individuals": selected_individuals,
+        "selected_female_headed_households": category_counts[CATEGORY_FEMALE_HEADED],
+        "selected_youth_households": category_counts[CATEGORY_YOUTH],
+        "selected_other_households": category_counts[CATEGORY_OTHER],
+        "reserve_households": len(reserve),
+    }
+    return selection_result, summary
