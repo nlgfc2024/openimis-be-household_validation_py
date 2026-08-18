@@ -102,12 +102,15 @@ Preview and export should receive the same filter payload so they describe the s
 
 - `regionId` or `regionCode`
 - `districtId` or `districtCode`
-- `taId` or `taCode`
-- `villageId` or `villageCode`
+- `taId` or `taCode` or `taCodes`
+- `gvhCodes`
+- `villageId` or `villageCode` or `villageCodes`
+- `hotspotId` or `hotspotCode`
+- `catchmentId` or `catchmentCode` (micro-catchment)
 - `excludeVerifiedAfter`
 - `targetCount`
 
-`ta` maps to the municipality/TA level in the location hierarchy. Hotspot and public works catchment remain future-facing and are not used for current selection. Selection quota percentages (female-headed, youth, reserve) are no longer request arguments — they come from `ModuleConfiguration` (see above).
+`ta` maps to the municipality/TA level in the location hierarchy. `hotspotId`/`hotspotCode` resolve to a `location.Hotspot` and scope selection to its linked villages; `catchmentId`/`catchmentCode` resolve to a `location.MicroCatchment` and scope selection to its linked TAs and GVHs. Only one location filter tier applies per request — the most specific one supplied wins, in this order: village > GVH > hotspot > TA > micro-catchment > district > region. Selection quota percentages (female-headed, youth, reserve) are no longer request arguments — they come from `ModuleConfiguration` (see above).
 
 Project dropdown query:
 

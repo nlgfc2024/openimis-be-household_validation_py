@@ -208,7 +208,6 @@ class Query(graphene.ObjectType):
         return {
             key: kwargs.get(key)
             for key in VALIDATION_FILTER_ARG_NAMES
-            if key not in {"hotspot_id", "hotspot_code", "catchment_id", "catchment_code"}
         }
 
 
