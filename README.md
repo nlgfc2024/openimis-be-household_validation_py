@@ -42,13 +42,24 @@ The integration extension also implements the backend surface required by the va
 
 - Summary statistics for the validation cards.
 - Preview rows for the selected household/member list.
-- Shared selection behavior for summary, preview, and Excel export.
-- Region, district, TA/municipality, and village filter support.
-- Configurable female-headed, youth, and reserve percentage inputs.
-- Default 40/40/20 main quota behavior and default 10% reserve behavior.
-- Guarding quota percentages so over-allocated inputs cannot select more than the requested target.
+- Shared selection behavior for preview and Excel export (`generateHouseholdValidationList`'s response embeds the same summary counts, so no separate summary query is needed).
+- Region, district, TA/municipality, GVH, village, hotspot, and micro-catchment filter support.
+- Quota-based main-list selection plus a reserve/waiting list — see "Selection Algorithm" below.
 
 Enrollment remains a reference workflow only. This module does not call enrollment mutations and does not create `GroupBeneficiaryProjectEnrollment` records.
+
+## Selection Algorithm
+
+`household_validation/selection.py::select_households` is the single implementation behind `generateHouseholdValidationList`, `householdValidationPreview`, and the Excel export, so all three always describe the same selection. It runs in this order:
+
+1. **Sort.** Eligible households (at least one fit-for-work member; not excluded by `excludeVerifiedAfter`) are sorted by `household_wealth_quintile` ascending — `Poorest` first, `Richest` last. This quintile is the available proxy for PMT score (there is no separate numeric PMT field on the household); households within the same quintile are ordered by code/id.
+2. **Categorize.** Each household is tagged with exactly one category: `FEMALE_HEADED` (head is female), `YOUTH` (no female head, but at least one eligible member aged 18-35), or `OTHER` (neither).
+3. **Split `targetCount` into quotas.** The requested main-list size (`targetCount`, or every eligible household if omitted) is split into three quotas by percentage: **40% female-headed, 40% youth-headed, 20% other**, by default. The female-headed and youth-headed percentages are independently configurable (see below); the "other" quota is always whatever's left after them, so it's exactly the requirement's "remaining 20%, by PMT score alone." If the two configured percentages together exceed 100%, they're scaled down proportionally so their sum never exceeds 100%.
+4. **Fill each quota from its own PMT-sorted pool**, taking the female-headed pool first, then youth, then other. Because the three pools are disjoint and each quota is filled independently, this order only affects row order in the exported list, not which households are ultimately selected.
+5. **Backfill any shortfall.** If a category's pool can't fill its own quota (e.g. too few youth-headed households in the filtered area), the gap is backfilled from whatever eligible households remain, still walked in PMT order — so the main list reaches `targetCount` as long as enough eligible households exist in total, even if the 40/40/20 split isn't hit exactly for that run.
+6. **Build the reserve/waiting list.** Once the main list is filled, the reserve list is drawn from the households still left over, continuing in the *same* PMT-sorted order (not a fresh sort) — so the waiting list is a direct continuation of the main list's ranking. Its size defaults to **20%** of the main list size, capped by whatever eligible households remain.
+
+None of the three percentages are GraphQL arguments on `generateHouseholdValidationList` — they're read from `ModuleConfiguration` for the `household_validation` module (see the "Permissions" section below), so they can be retuned without a code deploy.
 
 ## Permissions
 
@@ -69,13 +80,11 @@ The module configuration exposes these GraphQL permission keys:
 - `gql_query_household_validation_history_perms`
 - `gql_query_household_validation_error_report_perms`
 
-It also exposes the selection quota percentages used by `generateHouseholdValidationList` and `householdValidationPreview` (these are no longer accepted as GraphQL arguments; update `ModuleConfiguration` for the `household_validation` module to change them):
+It also exposes the selection quota percentages used by the algorithm described in "Selection Algorithm" above (these are no longer accepted as GraphQL arguments; update `ModuleConfiguration` for the `household_validation` module to change them):
 
 - `gql_mutation_female_headed_percentage` (default `40`)
 - `gql_mutation_youth_percentage` (default `40`)
-- `gql_mutation_reserve_percentage` (default `20`)
-
-The remainder after the female-headed and youth quotas (default `20%`) is filled by the PMT/wealth-quintile-ranked "other" pool.
+- `gql_mutation_reserve_percentage` (default `20`, applied to the main-list size to size the reserve/waiting list)
 
 ## GraphQL Backend Testing
 
@@ -317,8 +326,10 @@ Implemented and verified in the integration extension:
 - `generateHouseholdValidationList` and `householdValidationPreview` accept the same region/location filters.
 - Generation and preview share the same eligible-household selection service.
 - Region filtering is supported in addition to district/TA/village filtering.
-- Female-headed, youth, and reserve quota percentages are configured via `ModuleConfiguration` (default 40/40/20) rather than passed as request arguments.
+- Female-headed, youth, and reserve quota percentages are configured via `ModuleConfiguration` (default 40/40/20 main quotas, 20% reserve) rather than passed as request arguments.
 - Percentage over-allocation is normalized so selection cannot exceed the requested target.
+- Households are sorted poorest-first by wealth quintile (PMT proxy) before quotas are applied, and the reserve/waiting list continues in that same order past the main list rather than being re-sorted.
+- Hotspot and micro-catchment filters (`hotspotId`/`hotspotCode`, `catchmentId`/`catchmentCode`) scope selection to a `location.Hotspot`'s villages or a `location.MicroCatchment`'s TAs/GVHs.
 - Upload and export behavior still do not create enrollment records.
 
 Local verification commands:
@@ -335,8 +346,8 @@ cd openimis-be_py/openIMIS
 Latest local result:
 
 ```text
-Found 54 test(s).
-Ran 54 tests.
+Found 67 test(s).
+Ran 67 tests.
 OK
 ```
 
