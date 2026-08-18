@@ -375,6 +375,43 @@ class HouseholdSelectionTest(TestCase):
             [CATEGORY_YOUTH, CATEGORY_FEMALE_HEADED],
         )
 
+    def test_other_quota_absorbs_the_remainder_when_configured_percentages_total_below_100(self):
+        households = (
+            [_household(f"female-{i}", "Poorest", head_gender="Female") for i in range(5)]
+            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25) for i in range(5)]
+            + [_household(f"other-{i}", "Poorest") for i in range(5)]
+        )
+
+        with (
+            patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 30),
+            patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 30),
+        ):
+            result, summary = select_households(households, target_count=10)
+
+        self.assertEqual(len(result.main), 10)
+        self.assertEqual(summary["selected_female_headed_households"], 3)
+        self.assertEqual(summary["selected_youth_households"], 3)
+        self.assertEqual(summary["selected_other_households"], 4)
+
+    def test_female_and_youth_quotas_are_normalized_when_configured_percentages_exceed_100(self):
+        households = (
+            [_household(f"female-{i}", "Poorest", head_gender="Female") for i in range(10)]
+            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25) for i in range(10)]
+        )
+
+        with (
+            patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 70),
+            patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 60),
+        ):
+            result, summary = select_households(households, target_count=10)
+
+        self.assertEqual(len(result.main), 10)
+        self.assertEqual(summary["selected_other_households"], 0)
+        self.assertEqual(
+            summary["selected_female_headed_households"] + summary["selected_youth_households"],
+            10,
+        )
+
 
 class HouseholdValidationPreviewServiceTest(TestCase):
     def test_generate_and_preview_share_selection_result(self):
