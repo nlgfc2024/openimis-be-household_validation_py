@@ -54,7 +54,7 @@ Enrollment remains a reference workflow only. This module does not call enrollme
 
 1. **Sort.** Eligible households (at least one fit-for-work member; not excluded by `excludeVerifiedAfter`) are sorted by `household_wealth_quintile` ascending — `Poorest` first, `Richest` last. This quintile is the available proxy for PMT score (there is no separate numeric PMT field on the household); households within the same quintile are ordered by code/id.
 2. **Categorize.** Each household is tagged with exactly one category: `FEMALE_HEADED` (head is female), `YOUTH` (no female head, but at least one eligible member aged 18-35), or `OTHER` (neither).
-3. **Split `targetCount` into quotas.** The requested main-list size (`targetCount`, or every eligible household if omitted) is split into three quotas by percentage: **40% female-headed, 40% youth-headed, 20% other**, by default. The female-headed and youth-headed percentages are independently configurable (see below); the "other" quota is always whatever's left after them, so it's exactly the requirement's "remaining 20%, by PMT score alone." If the two configured percentages together exceed 100%, they're scaled down proportionally so their sum never exceeds 100%.
+3. **Split `targetCount` into quotas.** The requested main-list size (`targetCount`, or every eligible household if omitted) is split into three quotas by percentage: **40% female-headed, 40% youth-headed, 20% other**, by default. Only the female-headed and youth-headed percentages are configured values (see below) — there is no separate "other" percentage setting anywhere. The "other" quota is *always computed live* as `100% - femaleHeadedPercentage - youthPercentage`, so it stays correct for any configured pair, not just the 40/40 default: e.g. 30/30 leaves 40% for other, 45/45 leaves 10%. If the two configured percentages together exceed 100%, they're scaled down proportionally so their sum is exactly 100% and "other" is 0% — the three quotas can never sum to anything but the full `targetCount`.
 4. **Fill each quota from its own PMT-sorted pool**, taking the female-headed pool first, then youth, then other. Because the three pools are disjoint and each quota is filled independently, this order only affects row order in the exported list, not which households are ultimately selected.
 5. **Backfill any shortfall.** If a category's pool can't fill its own quota (e.g. too few youth-headed households in the filtered area), the gap is backfilled from whatever eligible households remain, still walked in PMT order — so the main list reaches `targetCount` as long as enough eligible households exist in total, even if the 40/40/20 split isn't hit exactly for that run.
 6. **Build the reserve/waiting list.** Once the main list is filled, the reserve list is drawn from the households still left over, continuing in the *same* PMT-sorted order (not a fresh sort) — so the waiting list is a direct continuation of the main list's ranking. Its size defaults to **20%** of the main list size, capped by whatever eligible households remain.
@@ -85,6 +85,8 @@ It also exposes the selection quota percentages used by the algorithm described 
 - `gql_mutation_female_headed_percentage` (default `40`)
 - `gql_mutation_youth_percentage` (default `40`)
 - `gql_mutation_reserve_percentage` (default `20`, applied to the main-list size to size the reserve/waiting list)
+
+There is intentionally no `gql_mutation_other_percentage` key — the "other" quota is always derived as `100% - femaleHeadedPercentage - youthPercentage`, so it stays correct however the two configured values are changed.
 
 ## GraphQL Backend Testing
 
@@ -346,8 +348,8 @@ cd openimis-be_py/openIMIS
 Latest local result:
 
 ```text
-Found 67 test(s).
-Ran 67 tests.
+Found 69 test(s).
+Ran 69 tests.
 OK
 ```
 
