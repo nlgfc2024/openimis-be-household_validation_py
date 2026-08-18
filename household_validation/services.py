@@ -11,6 +11,7 @@ from django.utils import timezone
 
 from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService
+from location.models import Hotspot, MicroCatchment
 from project_social_protection.models import Project
 
 from household_validation.excel import LOCATION_COLUMN_TYPES
@@ -446,6 +447,10 @@ class EligibleHouseholdSelectionService:
         village_id=None,
         village_code=None,
         village_codes=None,
+        hotspot_id=None,
+        hotspot_code=None,
+        catchment_id=None,
+        catchment_code=None,
         exclude_verified_after=None,
         target_count=None,
     ):
@@ -461,6 +466,10 @@ class EligibleHouseholdSelectionService:
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
+            hotspot_id=hotspot_id,
+            hotspot_code=hotspot_code,
+            catchment_id=catchment_id,
+            catchment_code=catchment_code,
         )
         selection_result, _ = select_households(
             candidates,
@@ -482,6 +491,10 @@ class EligibleHouseholdSelectionService:
         village_id=None,
         village_code=None,
         village_codes=None,
+        hotspot_id=None,
+        hotspot_code=None,
+        catchment_id=None,
+        catchment_code=None,
     ):
         queryset = self._base_queryset()
         queryset = self._apply_location_filters(
@@ -497,6 +510,10 @@ class EligibleHouseholdSelectionService:
             village_id=village_id,
             village_code=village_code,
             village_codes=village_codes,
+            hotspot_id=hotspot_id,
+            hotspot_code=hotspot_code,
+            catchment_id=catchment_id,
+            catchment_code=catchment_code,
         )
         return [
             household
@@ -524,6 +541,10 @@ class EligibleHouseholdSelectionService:
             village_id=filters.get("village_id"),
             village_code=filters.get("village_code"),
             village_codes=filters.get("village_codes"),
+            hotspot_id=filters.get("hotspot_id"),
+            hotspot_code=filters.get("hotspot_code"),
+            catchment_id=filters.get("catchment_id"),
+            catchment_code=filters.get("catchment_code"),
         )
         groups = list(queryset)
         total_households = len(groups)
@@ -584,6 +605,10 @@ class EligibleHouseholdSelectionService:
         village_id=None,
         village_code=None,
         village_codes=None,
+        hotspot_id=None,
+        hotspot_code=None,
+        catchment_id=None,
+        catchment_code=None,
     ):
         # Accept both the legacy singular ``village_code`` and the plural
         # ``village_codes`` list; merge them into a single code set.
@@ -606,6 +631,18 @@ class EligibleHouseholdSelectionService:
                 | Q(location__parent__code__in=selected_gvh_codes)
             )
 
+        # A hotspot is a curated set of specific villages, finer-grained than a
+        # plain TA/GVH pick, so it's checked before those but still yields to an
+        # explicit village/GVH selection made on top of it in the UI.
+        if hotspot_id or hotspot_code:
+            hotspot = self._resolve_hotspot(hotspot_id, hotspot_code)
+            if hotspot is None:
+                return queryset.none()
+            hotspot_village_codes = list(hotspot.villages.values_list("code", flat=True))
+            if not hotspot_village_codes:
+                return queryset.none()
+            return queryset.filter(location__code__in=hotspot_village_codes)
+
         selected_ta_codes = list(dict.fromkeys(ta_codes or []))
         if ta_code:
             selected_ta_codes.append(ta_code)
@@ -625,6 +662,37 @@ class EligibleHouseholdSelectionService:
                     | Q(location__parent__parent__code__in=selected_ta_codes)
                 )
             return queryset.filter(ta_filter)
+
+        # A micro-catchment spans a set of TAs and/or GVHs within a district.
+        if catchment_id or catchment_code:
+            micro_catchment = self._resolve_micro_catchment(catchment_id, catchment_code)
+            if micro_catchment is None:
+                return queryset.none()
+            catchment_ta_codes = list(
+                micro_catchment.traditional_authorities.filter(
+                    validity_to__isnull=True,
+                ).values_list("location__code", flat=True)
+            )
+            catchment_gvh_codes = list(
+                micro_catchment.gvhs.filter(
+                    validity_to__isnull=True,
+                ).values_list("location__code", flat=True)
+            )
+            catchment_filter = Q()
+            if catchment_ta_codes:
+                catchment_filter |= (
+                    Q(location__code__in=catchment_ta_codes)
+                    | Q(location__parent__code__in=catchment_ta_codes)
+                    | Q(location__parent__parent__code__in=catchment_ta_codes)
+                )
+            if catchment_gvh_codes:
+                catchment_filter |= (
+                    Q(location__code__in=catchment_gvh_codes)
+                    | Q(location__parent__code__in=catchment_gvh_codes)
+                )
+            if not catchment_filter:
+                return queryset.none()
+            return queryset.filter(catchment_filter)
 
         if district_id or district_code:
             district_filter = Q()
@@ -661,6 +729,26 @@ class EligibleHouseholdSelectionService:
                 )
             return queryset.filter(region_filter)
         return queryset
+
+    def _resolve_hotspot(self, hotspot_id, hotspot_code):
+        identity_filter = Q()
+        if hotspot_id:
+            identity_filter |= Q(uuid=hotspot_id)
+        if hotspot_code:
+            identity_filter |= Q(code=hotspot_code)
+        if not identity_filter:
+            return None
+        return Hotspot.objects.filter(identity_filter, validity_to__isnull=True).first()
+
+    def _resolve_micro_catchment(self, catchment_id, catchment_code):
+        identity_filter = Q()
+        if catchment_id:
+            identity_filter |= Q(uuid=catchment_id)
+        if catchment_code:
+            identity_filter |= Q(code=catchment_code)
+        if not identity_filter:
+            return None
+        return MicroCatchment.objects.filter(identity_filter, validity_to__isnull=True).first()
 
     def _build_household(self, group):
         groupindividuals = list(group.groupindividuals.all())

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, call, patch
 
+from django.db.models import Q
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
 
@@ -429,6 +430,138 @@ class HouseholdValidationPreviewServiceTest(TestCase):
         self.assertEqual(row.village, "Village")
         self.assertEqual(row.wealth_quintile, "Poorest")
         self.assertEqual(row.validation_status, "VERIFIED")
+
+
+class HotspotAndMicroCatchmentResolutionTest(TestCase):
+    @patch("household_validation.services.Hotspot.objects.filter")
+    def test_resolve_hotspot_filters_by_uuid_code_and_validity(self, filter_mock):
+        filter_mock.return_value.first.return_value = "hotspot-instance"
+        service = EligibleHouseholdSelectionService()
+
+        result = service._resolve_hotspot("hotspot-uuid", "HS01")
+
+        self.assertEqual(result, "hotspot-instance")
+        self.assertEqual(filter_mock.call_args[0][0], Q(uuid="hotspot-uuid") | Q(code="HS01"))
+        self.assertEqual(filter_mock.call_args[1], {"validity_to__isnull": True})
+
+    def test_resolve_hotspot_returns_none_without_identifiers(self):
+        service = EligibleHouseholdSelectionService()
+        self.assertIsNone(service._resolve_hotspot(None, None))
+
+    @patch("household_validation.services.MicroCatchment.objects.filter")
+    def test_resolve_micro_catchment_filters_by_uuid_code_and_validity(self, filter_mock):
+        filter_mock.return_value.first.return_value = "catchment-instance"
+        service = EligibleHouseholdSelectionService()
+
+        result = service._resolve_micro_catchment("catchment-uuid", "MC01")
+
+        self.assertEqual(result, "catchment-instance")
+        self.assertEqual(filter_mock.call_args[0][0], Q(uuid="catchment-uuid") | Q(code="MC01"))
+        self.assertEqual(filter_mock.call_args[1], {"validity_to__isnull": True})
+
+    def test_resolve_micro_catchment_returns_none_without_identifiers(self):
+        service = EligibleHouseholdSelectionService()
+        self.assertIsNone(service._resolve_micro_catchment(None, None))
+
+
+class LocationFilterHotspotAndCatchmentTest(TestCase):
+    def test_scopes_to_hotspot_villages(self):
+        service = EligibleHouseholdSelectionService()
+        hotspot = SimpleNamespace(
+            villages=SimpleNamespace(values_list=lambda *a, **k: ["V01", "V02"]),
+        )
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_hotspot", return_value=hotspot) as resolve_mock:
+            result = service._apply_location_filters(queryset, hotspot_code="HS01")
+
+        resolve_mock.assert_called_once_with(None, "HS01")
+        queryset.filter.assert_called_once_with(location__code__in=["V01", "V02"])
+        self.assertIs(result, queryset.filter.return_value)
+
+    def test_unknown_hotspot_yields_no_households(self):
+        service = EligibleHouseholdSelectionService()
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_hotspot", return_value=None):
+            result = service._apply_location_filters(queryset, hotspot_id="missing")
+
+        queryset.none.assert_called_once()
+        self.assertIs(result, queryset.none.return_value)
+
+    def test_hotspot_with_no_villages_yields_no_households(self):
+        service = EligibleHouseholdSelectionService()
+        hotspot = SimpleNamespace(villages=SimpleNamespace(values_list=lambda *a, **k: []))
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_hotspot", return_value=hotspot):
+            result = service._apply_location_filters(queryset, hotspot_code="HS01")
+
+        queryset.none.assert_called_once()
+        self.assertIs(result, queryset.none.return_value)
+
+    def test_explicit_village_selection_overrides_hotspot(self):
+        service = EligibleHouseholdSelectionService()
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_hotspot") as resolve_mock:
+            service._apply_location_filters(
+                queryset,
+                village_codes=["V01"],
+                hotspot_code="HS01",
+            )
+
+        resolve_mock.assert_not_called()
+
+    def test_scopes_to_micro_catchment_tas_and_gvhs(self):
+        service = EligibleHouseholdSelectionService()
+        micro_catchment = SimpleNamespace(
+            traditional_authorities=SimpleNamespace(
+                filter=lambda **k: SimpleNamespace(values_list=lambda *a, **k2: ["TA01"]),
+            ),
+            gvhs=SimpleNamespace(
+                filter=lambda **k: SimpleNamespace(values_list=lambda *a, **k2: ["GVH01"]),
+            ),
+        )
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_micro_catchment", return_value=micro_catchment) as resolve_mock:
+            result = service._apply_location_filters(queryset, catchment_code="MC01")
+
+        resolve_mock.assert_called_once_with(None, "MC01")
+        expected_filter = (
+            Q(location__code__in=["TA01"])
+            | Q(location__parent__code__in=["TA01"])
+            | Q(location__parent__parent__code__in=["TA01"])
+        ) | (
+            Q(location__code__in=["GVH01"])
+            | Q(location__parent__code__in=["GVH01"])
+        )
+        queryset.filter.assert_called_once_with(expected_filter)
+        self.assertIs(result, queryset.filter.return_value)
+
+    def test_unknown_micro_catchment_yields_no_households(self):
+        service = EligibleHouseholdSelectionService()
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_micro_catchment", return_value=None):
+            result = service._apply_location_filters(queryset, catchment_id="missing")
+
+        queryset.none.assert_called_once()
+        self.assertIs(result, queryset.none.return_value)
+
+    def test_explicit_ta_selection_overrides_micro_catchment(self):
+        service = EligibleHouseholdSelectionService()
+        queryset = MagicMock()
+
+        with patch.object(service, "_resolve_micro_catchment") as resolve_mock:
+            service._apply_location_filters(
+                queryset,
+                ta_codes=["TA01"],
+                catchment_code="MC01",
+            )
+
+        resolve_mock.assert_not_called()
 
 
 class _FakeSelectionService(EligibleHouseholdSelectionService):

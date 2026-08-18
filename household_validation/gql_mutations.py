@@ -87,6 +87,10 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             village_id=data.get("village_id"),
             village_code=data.get("village_code"),
             village_codes=data.get("village_codes"),
+            hotspot_id=data.get("hotspot_id"),
+            hotspot_code=data.get("hotspot_code"),
+            catchment_id=data.get("catchment_id"),
+            catchment_code=data.get("catchment_code"),
             exclude_verified_after=data.get("exclude_verified_after"),
             target_count=data.get("target_count"),
         )
