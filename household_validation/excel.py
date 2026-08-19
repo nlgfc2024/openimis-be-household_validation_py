@@ -18,11 +18,17 @@ LOCATION_COLUMN_TYPES = {
     "Village": "V",
 }
 
+MICRO_CATCHMENT_COLUMN = "Micro-Catchment"
+
 
 EXCEL_COLUMNS = [
     "batch_id",
     "row_type",
-    *LOCATION_COLUMN_TYPES,
+    "District",
+    MICRO_CATCHMENT_COLUMN,
+    "TA",
+    "GVH",
+    "Village",
     "form_number",
     "group_uuid",
     "member_uuid",
@@ -66,6 +72,7 @@ class ExcelValidationListExporter:
         self.selection_result = selection_result
         self.batch_id = batch_id
         self.projects = projects or []
+        self._micro_catchment_cache = {}
 
     def export_workbook(self):
         workbook = Workbook()
@@ -143,6 +150,7 @@ class ExcelValidationListExporter:
                 column: self._location_name(location, location_type)
                 for column, location_type in LOCATION_COLUMN_TYPES.items()
             },
+            MICRO_CATCHMENT_COLUMN: self._micro_catchment_name(location),
             "form_number": get_household_form_number(group, individual),
             "group_uuid": str(household.id),
             "member_uuid": str(member.id),
@@ -223,6 +231,51 @@ class ExcelValidationListExporter:
                 return getattr(current, "name", None) or getattr(current, "code", None)
             current = getattr(current, "parent", None)
         return None
+
+    def _micro_catchment_name(self, location):
+        """Micro-catchment for the row's location.
+
+        A micro-catchment isn't a level in the Region/TA/GVH/Village chain — it's
+        a separate grouping of specific GVHs (and TAs) defined in ``location.MicroCatchment``.
+        Prefer a GVH-level link (more specific) and fall back to the TA-level link.
+        """
+        gvh_location = self._location_ancestor(location, "W")
+        if gvh_location is not None:
+            name = self._micro_catchment_link_name(gvh_location, "micro_catchments_gvh")
+            if name:
+                return name
+
+        ta_location = self._location_ancestor(location, "D")
+        if ta_location is not None:
+            return self._micro_catchment_link_name(ta_location, "micro_catchments_ta")
+
+        return None
+
+    def _location_ancestor(self, location, location_type):
+        current = location
+        while current is not None:
+            if getattr(current, "type", None) == location_type:
+                return current
+            current = getattr(current, "parent", None)
+        return None
+
+    def _micro_catchment_link_name(self, location, related_name):
+        related_manager = getattr(location, related_name, None)
+        location_id = getattr(location, "id", None)
+        if related_manager is None or location_id is None:
+            return None
+        cache_key = (related_name, location_id)
+        if cache_key not in self._micro_catchment_cache:
+            link = related_manager.filter(
+                validity_to__isnull=True,
+                micro_catchment__validity_to__isnull=True,
+            ).select_related("micro_catchment").first()
+            micro_catchment = link.micro_catchment if link else None
+            name = None
+            if micro_catchment is not None:
+                name = micro_catchment.name or micro_catchment.code
+            self._micro_catchment_cache[cache_key] = name
+        return self._micro_catchment_cache[cache_key]
 
     def _member_name(self, individual):
         if not individual:

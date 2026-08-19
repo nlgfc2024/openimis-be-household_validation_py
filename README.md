@@ -348,8 +348,8 @@ cd openimis-be_py/openIMIS
 Latest local result:
 
 ```text
-Found 69 test(s).
-Ran 69 tests.
+Found 72 test(s).
+Ran 72 tests.
 OK
 ```
 
