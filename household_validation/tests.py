@@ -103,9 +103,9 @@ class HouseholdValidationConfigTest(TestCase):
         )
 
     def test_default_config_exposes_selection_percentages(self):
-        self.assertEqual(DEFAULT_CONFIG["gql_mutation_female_headed_percentage"], 40)
-        self.assertEqual(DEFAULT_CONFIG["gql_mutation_youth_percentage"], 40)
-        self.assertEqual(DEFAULT_CONFIG["gql_mutation_reserve_percentage"], 20)
+        self.assertEqual(DEFAULT_CONFIG["female_headed_percentage"], 40)
+        self.assertEqual(DEFAULT_CONFIG["youth_percentage"], 40)
+        self.assertEqual(DEFAULT_CONFIG["reserve_percentage"], 20)
 
     def test_right_sets_match_default_config_scope(self):
         self.assertEqual(
@@ -229,7 +229,7 @@ class HouseholdSelectionTest(TestCase):
             _household("other", "Middle"),
         ]
 
-        with patch.object(HouseholdValidationConfig, "gql_mutation_reserve_percentage", 50):
+        with patch.object(HouseholdValidationConfig, "reserve_percentage", 50):
             result, summary = select_households(households, target_count=2)
 
         self.assertEqual(len(result.main), 2)
@@ -365,8 +365,8 @@ class HouseholdSelectionTest(TestCase):
         ]
 
         with (
-            patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 0),
-            patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 100),
+            patch.object(HouseholdValidationConfig, "female_headed_percentage", 0),
+            patch.object(HouseholdValidationConfig, "youth_percentage", 100),
         ):
             result, _ = select_households(households, target_count=2)
 
@@ -383,8 +383,8 @@ class HouseholdSelectionTest(TestCase):
         )
 
         with (
-            patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 30),
-            patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 30),
+            patch.object(HouseholdValidationConfig, "female_headed_percentage", 30),
+            patch.object(HouseholdValidationConfig, "youth_percentage", 30),
         ):
             result, summary = select_households(households, target_count=10)
 
@@ -400,8 +400,8 @@ class HouseholdSelectionTest(TestCase):
         )
 
         with (
-            patch.object(HouseholdValidationConfig, "gql_mutation_female_headed_percentage", 70),
-            patch.object(HouseholdValidationConfig, "gql_mutation_youth_percentage", 60),
+            patch.object(HouseholdValidationConfig, "female_headed_percentage", 70),
+            patch.object(HouseholdValidationConfig, "youth_percentage", 60),
         ):
             result, summary = select_households(households, target_count=10)
 

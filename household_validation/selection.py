@@ -171,15 +171,15 @@ def _configured_percentage(attr_name, default):
 
 
 def female_headed_percentage():
-    return _configured_percentage("gql_mutation_female_headed_percentage", 40)
+    return _configured_percentage("female_headed_percentage", 40)
 
 
 def youth_percentage():
-    return _configured_percentage("gql_mutation_youth_percentage", 40)
+    return _configured_percentage("youth_percentage", 40)
 
 
 def reserve_percentage():
-    return _configured_percentage("gql_mutation_reserve_percentage", 20)
+    return _configured_percentage("reserve_percentage", 20)
 
 
 def _allocate_quotas(target_count):
