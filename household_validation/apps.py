@@ -69,9 +69,9 @@ DEFAULT_CONFIG = {
     ],
     "group_search_perms": [str(RIGHT_GROUP_SEARCH)],
     "group_update_perms": [str(RIGHT_GROUP_UPDATE)],
-    "gql_mutation_female_headed_percentage": 40,
-    "gql_mutation_youth_percentage": 40,
-    "gql_mutation_reserve_percentage": 20,
+    "female_headed_percentage": 40,
+    "youth_percentage": 40,
+    "reserve_percentage": 20,
 }
 
 
@@ -86,9 +86,9 @@ class HouseholdValidationConfig(AppConfig):
     gql_query_household_validation_error_report_perms = None
     group_search_perms = None
     group_update_perms = None
-    gql_mutation_female_headed_percentage = None
-    gql_mutation_youth_percentage = None
-    gql_mutation_reserve_percentage = None
+    female_headed_percentage = None
+    youth_percentage = None
+    reserve_percentage = None
 
     @classmethod
     def _load_config(cls, cfg):

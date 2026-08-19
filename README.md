@@ -82,11 +82,11 @@ The module configuration exposes these GraphQL permission keys:
 
 It also exposes the selection quota percentages used by the algorithm described in "Selection Algorithm" above (these are no longer accepted as GraphQL arguments; update `ModuleConfiguration` for the `household_validation` module to change them):
 
-- `gql_mutation_female_headed_percentage` (default `40`)
-- `gql_mutation_youth_percentage` (default `40`)
-- `gql_mutation_reserve_percentage` (default `20`, applied to the main-list size to size the reserve/waiting list)
+- `female_headed_percentage` (default `40`)
+- `youth_percentage` (default `40`)
+- `reserve_percentage` (default `20`, applied to the main-list size to size the reserve/waiting list)
 
-There is intentionally no `gql_mutation_other_percentage` key — the "other" quota is always derived as `100% - femaleHeadedPercentage - youthPercentage`, so it stays correct however the two configured values are changed.
+There is intentionally no `other_percentage` key — the "other" quota is always derived as `100% - femaleHeadedPercentage - youthPercentage`, so it stays correct however the two configured values are changed.
 
 ## GraphQL Backend Testing
 
