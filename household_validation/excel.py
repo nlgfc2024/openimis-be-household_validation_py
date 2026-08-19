@@ -19,6 +19,7 @@ LOCATION_COLUMN_TYPES = {
 }
 
 MICRO_CATCHMENT_COLUMN = "Micro-Catchment"
+HOTSPOT_COLUMN = "Hotspot"
 
 
 EXCEL_COLUMNS = [
@@ -28,6 +29,7 @@ EXCEL_COLUMNS = [
     MICRO_CATCHMENT_COLUMN,
     "TA",
     "GVH",
+    HOTSPOT_COLUMN,
     "Village",
     "form_number",
     "group_uuid",
@@ -73,6 +75,7 @@ class ExcelValidationListExporter:
         self.batch_id = batch_id
         self.projects = projects or []
         self._micro_catchment_cache = {}
+        self._hotspot_cache = {}
 
     def export_workbook(self):
         workbook = Workbook()
@@ -151,6 +154,7 @@ class ExcelValidationListExporter:
                 for column, location_type in LOCATION_COLUMN_TYPES.items()
             },
             MICRO_CATCHMENT_COLUMN: self._micro_catchment_name(location),
+            HOTSPOT_COLUMN: self._hotspot_name(location),
             "form_number": get_household_form_number(group, individual),
             "group_uuid": str(household.id),
             "member_uuid": str(member.id),
@@ -276,6 +280,33 @@ class ExcelValidationListExporter:
                 name = micro_catchment.name or micro_catchment.code
             self._micro_catchment_cache[cache_key] = name
         return self._micro_catchment_cache[cache_key]
+
+    def _hotspot_name(self, location):
+        """Hotspot for the row's location.
+
+        A hotspot links to specific villages (``location.HotspotVillage``), so unlike
+        the micro-catchment lookup there's no ancestor tier to fall back through —
+        just resolve the village-level ancestor's hotspot link, if any.
+        """
+        village_location = self._location_ancestor(location, "V")
+        if village_location is None:
+            return None
+
+        related_manager = getattr(village_location, "hotspot_links", None)
+        location_id = getattr(village_location, "id", None)
+        if related_manager is None or location_id is None:
+            return None
+        if location_id not in self._hotspot_cache:
+            link = related_manager.filter(
+                validity_to__isnull=True,
+                hotspot__validity_to__isnull=True,
+            ).select_related("hotspot").first()
+            hotspot = link.hotspot if link else None
+            name = None
+            if hotspot is not None:
+                name = hotspot.name or hotspot.code
+            self._hotspot_cache[location_id] = name
+        return self._hotspot_cache[location_id]
 
     def _member_name(self, individual):
         if not individual:
