@@ -27,6 +27,7 @@ from household_validation.apps import (
 )
 from household_validation.excel import (
     EXCEL_COLUMNS,
+    HOTSPOT_COLUMN,
     MICRO_CATCHMENT_COLUMN,
     PROJECT_OPTIONS_SHEET,
     ExcelValidationListExporter,
@@ -1130,6 +1131,42 @@ class ExcelValidationListExporterTest(TestCase):
         ).export_workbook()["Validation List"]
 
         self.assertIsNone(self._value(worksheet, MICRO_CATCHMENT_COLUMN))
+
+    def test_export_workbook_resolves_hotspot_from_village_link(self):
+        hotspot = SimpleNamespace(name="Hotspot A", code="HS-A")
+        link = SimpleNamespace(hotspot=hotspot)
+        village_manager = MagicMock()
+        village_manager.filter.return_value.select_related.return_value.first.return_value = link
+
+        district = SimpleNamespace(type="R", name="District", code="D01", parent=None)
+        ta = SimpleNamespace(type="D", name="Traditional Authority", code="TA01", parent=district)
+        gvh = SimpleNamespace(type="W", name="Group Village Head", code="GVH01", parent=ta)
+        village = SimpleNamespace(
+            type="V", name="Village", code="V01", parent=gvh, id=4,
+            hotspot_links=village_manager,
+        )
+
+        result = self._selection_result(location=village)
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertEqual(self._value(worksheet, HOTSPOT_COLUMN), "Hotspot A")
+        village_manager.filter.assert_called_once_with(
+            validity_to__isnull=True,
+            hotspot__validity_to__isnull=True,
+        )
+
+    def test_export_workbook_leaves_hotspot_blank_without_a_link(self):
+        result = self._selection_result()
+
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertIsNone(self._value(worksheet, HOTSPOT_COLUMN))
 
     def _selection_result(self, member_count=1, location=None):
         location = location or self._location_tree()
