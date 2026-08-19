@@ -27,6 +27,7 @@ from household_validation.apps import (
 )
 from household_validation.excel import (
     EXCEL_COLUMNS,
+    MICRO_CATCHMENT_COLUMN,
     PROJECT_OPTIONS_SHEET,
     ExcelValidationListExporter,
 )
@@ -1064,8 +1065,74 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "primary_worker", 3), "NO")
         self.assertIsNone(self._value(worksheet, "primary_worker", 4))
 
-    def _selection_result(self, member_count=1):
-        location = self._location_tree()
+    def test_export_workbook_resolves_micro_catchment_from_gvh_link(self):
+        micro_catchment = SimpleNamespace(name="Catchment A", code="MC-A")
+        link = SimpleNamespace(micro_catchment=micro_catchment)
+        gvh_manager = MagicMock()
+        gvh_manager.filter.return_value.select_related.return_value.first.return_value = link
+
+        district = SimpleNamespace(type="R", name="District", code="D01", parent=None)
+        ta = SimpleNamespace(
+            type="D", name="Traditional Authority", code="TA01", parent=district, id=2,
+        )
+        gvh = SimpleNamespace(
+            type="W", name="Group Village Head", code="GVH01", parent=ta, id=3,
+            micro_catchments_gvh=gvh_manager,
+        )
+        village = SimpleNamespace(type="V", name="Village", code="V01", parent=gvh)
+
+        result = self._selection_result(location=village)
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertEqual(self._value(worksheet, MICRO_CATCHMENT_COLUMN), "Catchment A")
+        gvh_manager.filter.assert_called_once_with(
+            validity_to__isnull=True,
+            micro_catchment__validity_to__isnull=True,
+        )
+
+    def test_export_workbook_falls_back_to_ta_micro_catchment_link(self):
+        micro_catchment = SimpleNamespace(name=None, code="MC-B")
+        link = SimpleNamespace(micro_catchment=micro_catchment)
+        ta_manager = MagicMock()
+        ta_manager.filter.return_value.select_related.return_value.first.return_value = link
+        gvh_manager = MagicMock()
+        gvh_manager.filter.return_value.select_related.return_value.first.return_value = None
+
+        district = SimpleNamespace(type="R", name="District", code="D01", parent=None)
+        ta = SimpleNamespace(
+            type="D", name="Traditional Authority", code="TA01", parent=district, id=2,
+            micro_catchments_ta=ta_manager,
+        )
+        gvh = SimpleNamespace(
+            type="W", name="Group Village Head", code="GVH01", parent=ta, id=3,
+            micro_catchments_gvh=gvh_manager,
+        )
+        village = SimpleNamespace(type="V", name="Village", code="V01", parent=gvh)
+
+        result = self._selection_result(location=village)
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        # No name on the micro-catchment, so the code is used as the label.
+        self.assertEqual(self._value(worksheet, MICRO_CATCHMENT_COLUMN), "MC-B")
+
+    def test_export_workbook_leaves_micro_catchment_blank_without_a_link(self):
+        result = self._selection_result()
+
+        worksheet = ExcelValidationListExporter(
+            result,
+            batch_id="batch-1",
+        ).export_workbook()["Validation List"]
+
+        self.assertIsNone(self._value(worksheet, MICRO_CATCHMENT_COLUMN))
+
+    def _selection_result(self, member_count=1, location=None):
+        location = location or self._location_tree()
         group = SimpleNamespace(id="group-1", code="HH-001", location=location)
         selected_members = []
         for index in range(1, member_count + 1):
