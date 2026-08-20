@@ -39,6 +39,8 @@ EXCEL_COLUMNS = [
     "member_gender",
     "member_dob",
     "member_age",
+    "marital_status",
+    "disability",
     "fit_for_work",
     "relationship",
     "head",
@@ -163,6 +165,8 @@ class ExcelValidationListExporter:
             "member_gender": member.gender,
             "member_dob": member.dob,
             "member_age": member.age,
+            "marital_status": self._marital_status(individual),
+            "disability": self._disability(individual),
             "fit_for_work": "YES" if member.fit_for_work else "NO",
             "relationship": self._relationship(member.role),
             "head": "YES" if self._is_head(member) else "NO",
@@ -319,6 +323,16 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("national_id")
+
+    def _marital_status(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("marital_status")
+
+    def _disability(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("disability")
 
     def _primary_worker(self, group_individual):
         primary_worker = (

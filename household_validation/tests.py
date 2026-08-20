@@ -931,6 +931,8 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "member_uuid"), "member-1")
         self.assertEqual(self._value(worksheet, "member_name"), "Ada Worker")
         self.assertEqual(self._value(worksheet, "national_id"), "NAT-001")
+        self.assertEqual(self._value(worksheet, "marital_status"), "Married")
+        self.assertEqual(self._value(worksheet, "disability"), "Not disabled")
         self.assertEqual(self._value(worksheet, "fit_for_work"), "YES")
         self.assertEqual(self._value(worksheet, "relationship"), "HEAD")
         self.assertEqual(self._value(worksheet, "head"), "YES")
@@ -1179,6 +1181,8 @@ class ExcelValidationListExporterTest(TestCase):
                 json_ext={
                     "form_number": "FORM-001",
                     "national_id": f"NAT-{index:03d}",
+                    "marital_status": "Married" if index == 1 else "Never married",
+                    "disability": "Not disabled",
                 },
             )
             group_individual = SimpleNamespace(individual=individual)
