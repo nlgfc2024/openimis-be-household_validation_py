@@ -342,6 +342,9 @@ class ExcelValidationListExporter:
             return "YES"
         if primary_worker is False:
             return "NO"
+        recipient_type = str(getattr(group_individual, "recipient_type", "") or "").upper()
+        if recipient_type == "PRIMARY":
+            return "YES"
         return None
 
     def _relationship(self, role):

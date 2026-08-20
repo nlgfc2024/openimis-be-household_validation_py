@@ -1068,6 +1068,34 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "primary_worker", 3), "NO")
         self.assertIsNone(self._value(worksheet, "primary_worker", 4))
 
+    def test_primary_worker_suggests_yes_for_primary_recipient_when_unverified(self):
+        exporter = ExcelValidationListExporter(
+            SelectionResult(main=[], reserve=[]), batch_id="batch-1",
+        )
+        group_individual = SimpleNamespace(json_ext={}, recipient_type="PRIMARY")
+
+        self.assertEqual(exporter._primary_worker(group_individual), "YES")
+
+    def test_primary_worker_leaves_non_primary_recipient_blank_when_unverified(self):
+        exporter = ExcelValidationListExporter(
+            SelectionResult(main=[], reserve=[]), batch_id="batch-1",
+        )
+        secondary = SimpleNamespace(json_ext={}, recipient_type="SECONDARY")
+        unset = SimpleNamespace(json_ext={}, recipient_type=None)
+
+        self.assertIsNone(exporter._primary_worker(secondary))
+        self.assertIsNone(exporter._primary_worker(unset))
+
+    def test_primary_worker_prefers_verified_value_over_recipient_type_suggestion(self):
+        exporter = ExcelValidationListExporter(
+            SelectionResult(main=[], reserve=[]), batch_id="batch-1",
+        )
+        confirmed_no = SimpleNamespace(json_ext={"primary_worker": False}, recipient_type="PRIMARY")
+        confirmed_yes = SimpleNamespace(json_ext={"primary_worker": True}, recipient_type="SECONDARY")
+
+        self.assertEqual(exporter._primary_worker(confirmed_no), "NO")
+        self.assertEqual(exporter._primary_worker(confirmed_yes), "YES")
+
     def test_export_workbook_resolves_micro_catchment_from_gvh_link(self):
         micro_catchment = SimpleNamespace(name="Catchment A", code="MC-A")
         link = SimpleNamespace(micro_catchment=micro_catchment)
