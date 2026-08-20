@@ -70,7 +70,7 @@ from household_validation.upload import (
     member_structural_errors,
     parse_validation_workbook,
 )
-from household_validation.wealth import get_household_wealth_quintile
+from household_validation.wealth import get_household_pmt_score, get_household_wealth_quintile
 
 
 class HouseholdValidationConfigTest(TestCase):
@@ -936,6 +936,7 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "fit_for_work"), "YES")
         self.assertEqual(self._value(worksheet, "relationship"), "HEAD")
         self.assertEqual(self._value(worksheet, "head"), "YES")
+        self.assertEqual(self._value(worksheet, "pmt_score"), -1.234)
         self.assertEqual(
             self._value(worksheet, "household_wealth_quintile"),
             "Poorest",
@@ -1201,6 +1202,7 @@ class ExcelValidationListExporterTest(TestCase):
             id="group-1",
             code="HH-001",
             wealth_quintile="Poorest",
+            pmt_score=-1.234,
             head=selected_members[0],
             eligible_members=selected_members,
             source=group,
@@ -1598,18 +1600,44 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(get_household_wealth_quintile(group), "Middle")
 
+    def test_pmt_score_resolver_ignores_members_who_are_not_fit_for_work(self):
+        ineligible_member = self._wealth_member(
+            "ineligible",
+            role="SPOUSE",
+            fit_for_work=False,
+            wealth_quintile="Richest",
+            pmt_score=9.9,
+        )
+        eligible_member = self._wealth_member(
+            "eligible",
+            role="SON",
+            fit_for_work=True,
+            wealth_quintile="Middle",
+            pmt_score=-1.5,
+        )
+        group = SimpleNamespace(
+            json_ext={},
+            groupindividuals=_FakeRelatedManager(
+                [ineligible_member, eligible_member]
+            ),
+        )
+
+        self.assertEqual(get_household_pmt_score(group), -1.5)
+
     def test_export_selection_uses_shared_wealth_precedence(self):
         other_member = self._wealth_member(
             "other",
             role="SPOUSE",
             fit_for_work=True,
             wealth_quintile="Richest",
+            pmt_score=9.9,
         )
         head = self._wealth_member(
             "head",
             role="HEAD",
             fit_for_work=True,
             wealth_quintile="Poorest",
+            pmt_score=-2.1,
         )
         group = SimpleNamespace(
             id="group-1",
@@ -1621,15 +1649,19 @@ class UploadHardeningTest(TestCase):
         household = EligibleHouseholdSelectionService()._build_household(group)
 
         self.assertEqual(household.wealth_quintile, "Poorest")
+        self.assertEqual(household.pmt_score, -2.1)
 
-    def _wealth_member(self, member_id, role, fit_for_work, wealth_quintile):
+    def _wealth_member(self, member_id, role, fit_for_work, wealth_quintile, pmt_score=None):
+        json_ext = {
+            "fit_for_work": fit_for_work,
+            "household_wealth_quintile": wealth_quintile,
+        }
+        if pmt_score is not None:
+            json_ext["household_pmt_score"] = pmt_score
         individual = SimpleNamespace(
             id=f"individual-{member_id}",
             dob=date(1990, 1, 1),
-            json_ext={
-                "fit_for_work": fit_for_work,
-                "household_wealth_quintile": wealth_quintile,
-            },
+            json_ext=json_ext,
         )
         return SimpleNamespace(
             id=f"membership-{member_id}",

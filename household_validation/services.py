@@ -35,7 +35,7 @@ from household_validation.upload import (
     member_structural_errors,
     parse_validation_workbook,
 )
-from household_validation.wealth import get_household_wealth_quintile
+from household_validation.wealth import get_household_pmt_score, get_household_wealth_quintile
 
 
 def _local_date(value):
@@ -765,6 +765,10 @@ class EligibleHouseholdSelectionService:
             group,
             group_individuals=groupindividuals,
         )
+        pmt_score = get_household_pmt_score(
+            group,
+            group_individuals=groupindividuals,
+        )
 
         group_json_ext = group.json_ext or {}
 
@@ -772,6 +776,7 @@ class EligibleHouseholdSelectionService:
             id=group.id,
             code=group.code,
             wealth_quintile=wealth_quintile,
+            pmt_score=pmt_score,
             last_verified_date=self._parse_date(group_json_ext.get("last_verified_date")),
             head=head,
             eligible_members=eligible_members,
