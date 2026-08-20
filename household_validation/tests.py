@@ -941,7 +941,6 @@ class ExcelValidationListExporterTest(TestCase):
             self._value(worksheet, "household_wealth_quintile"),
             "Poorest",
         )
-        self.assertEqual(self._value(worksheet, "current_recipient_type"), "PRIMARY")
 
         group = result.main[0].household.source
         self.assertEqual(group.code, "HH-001")
@@ -1418,7 +1417,6 @@ class UploadHardeningTest(TestCase):
                 "relationship": "SPOUSE",
                 "head": "NO",
                 "household_wealth_quintile": "Richest",
-                "current_recipient_type": "SECONDARY",
             },
             verified=None,
             primary_worker=None,
@@ -1440,7 +1438,6 @@ class UploadHardeningTest(TestCase):
             "Row 2: household_wealth_quintile does not match the household member",
             errors,
         )
-        self.assertIn("Row 2: current_recipient_type does not match the household member", errors)
 
     def test_structural_errors_accept_integer_like_excel_ids(self):
         group = SimpleNamespace(

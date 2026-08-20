@@ -272,7 +272,6 @@ def member_structural_errors(uploaded_row, group_individual, group=None):
         "relationship": _relationship(getattr(group_individual, "role", None)),
         "head": "YES" if str(getattr(group_individual, "role", "")).upper() == "HEAD" else "NO",
         "household_wealth_quintile": get_household_wealth_quintile(group),
-        "current_recipient_type": getattr(group_individual, "recipient_type", None),
     }
     strict_columns = {
         "form_number",
