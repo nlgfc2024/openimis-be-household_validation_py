@@ -3,11 +3,24 @@ from household_validation.selection import is_truthy
 
 def get_household_wealth_quintile(group, group_individuals=None):
     """Resolve wealth quintile consistently for export and upload."""
+    return _resolve_household_field(
+        group, "household_wealth_quintile", group_individuals=group_individuals
+    )
+
+
+def get_household_pmt_score(group, group_individuals=None):
+    """Resolve PMT score consistently for export and upload."""
+    return _resolve_household_field(
+        group, "household_pmt_score", group_individuals=group_individuals
+    )
+
+
+def _resolve_household_field(group, field_name, group_individuals=None):
     if group is None:
         return None
 
     group_json_ext = getattr(group, "json_ext", None) or {}
-    group_value = group_json_ext.get("household_wealth_quintile")
+    group_value = group_json_ext.get(field_name)
     if group_value is not None:
         return group_value
 
@@ -19,7 +32,7 @@ def get_household_wealth_quintile(group, group_individuals=None):
     group_individuals = list(group_individuals)
 
     head = _find_head(group_json_ext.get("head_id"), group_individuals)
-    head_value = _individual_wealth_quintile(head)
+    head_value = _individual_field(head, field_name)
     if head_value is not None:
         return head_value
 
@@ -28,7 +41,7 @@ def get_household_wealth_quintile(group, group_individuals=None):
         individual_json_ext = getattr(individual, "json_ext", None) or {}
         if not is_truthy(individual_json_ext.get("fit_for_work")):
             continue
-        member_value = individual_json_ext.get("household_wealth_quintile")
+        member_value = individual_json_ext.get(field_name)
         if member_value is not None:
             return member_value
     return None
@@ -46,9 +59,9 @@ def _find_head(head_id, group_individuals):
     return None
 
 
-def _individual_wealth_quintile(group_individual):
+def _individual_field(group_individual, field_name):
     if group_individual is None:
         return None
     individual = getattr(group_individual, "individual", None)
     individual_json_ext = getattr(individual, "json_ext", None) or {}
-    return individual_json_ext.get("household_wealth_quintile")
+    return individual_json_ext.get(field_name)

@@ -46,6 +46,7 @@ class EligibleHousehold:
     id: Any
     code: str | None = None
     wealth_quintile: str | int | None = None
+    pmt_score: str | float | None = None
     last_verified_date: date | None = None
     head: EligibleMember | None = None
     eligible_members: list[EligibleMember] = field(default_factory=list)
