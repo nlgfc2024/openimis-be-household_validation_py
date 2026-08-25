@@ -71,6 +71,7 @@ from household_validation.services import (
 )
 from household_validation.schema import Query
 from household_validation.upload import (
+    OPTIONAL_UPLOAD_COLUMNS,
     PROJECT_SELECTION_TYPE_INTENT,
     UploadedValidationRow,
     VALIDATION_STATUS_NOT_VERIFIED,
@@ -376,6 +377,52 @@ class HouseholdSelectionTest(TestCase):
         self.assertEqual(len(result.main), 10)
         self.assertEqual(len(result.reserve), 2)
         self.assertEqual(result.reserve[0].row_type, ROW_TYPE_RESERVE)
+
+    def test_reserve_capacity_uses_actual_main_selection_count(self):
+        households = [
+            _household(f"household-{index}", "Poorest")
+            for index in range(3)
+        ]
+        selected_main = [
+            SelectedHousehold(
+                household=household,
+                category=CATEGORY_OTHER,
+                row_type=ROW_TYPE_MAIN,
+            )
+            for household in households[:2]
+        ]
+        category_counts = {
+            CATEGORY_FEMALE_HEADED: 0,
+            CATEGORY_YOUTH: 0,
+            CATEGORY_OTHER: 2,
+        }
+        household_categories = {
+            household.id: CATEGORY_OTHER for household in households
+        }
+
+        with (
+            patch(
+                "household_validation.selection._select_main_households",
+                return_value=(
+                    selected_main,
+                    {household.id for household in households[:2]},
+                    category_counts,
+                    sum(
+                        len(household.eligible_members)
+                        for household in households[:2]
+                    ),
+                    household_categories,
+                ),
+            ),
+            patch.object(HouseholdValidationConfig, "reserve_percentage", 100),
+        ):
+            result, summary = select_households(households, target_count=3)
+
+        self.assertEqual(
+            [row.household.id for row in result.reserve],
+            [households[2].id],
+        )
+        self.assertEqual(summary["reserve_households"], 1)
 
     def test_select_households_excludes_recently_verified_households(self):
         households = [
@@ -1153,6 +1200,30 @@ class ValidationUploadParserTest(TestCase):
         self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
         self.assertIn("member_uuid", parsed.errors[0])
 
+    def test_parse_validation_workbook_accepts_previous_schema(self):
+        workbook = self._upload_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        for column_number in sorted(
+            (
+                EXCEL_COLUMNS.index(column) + 1
+                for column in OPTIONAL_UPLOAD_COLUMNS
+            ),
+            reverse=True,
+        ):
+            worksheet.delete_cols(column_number)
+        worksheet.cell(
+            row=1,
+            column=worksheet.max_column + 1,
+            value="current_recipient_type",
+        )
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows_read, 1)
+        for column in OPTIONAL_UPLOAD_COLUMNS:
+            self.assertIsNone(parsed.rows[0].values[column])
+
     def test_parse_validation_workbook_preserves_primary_worker_no_and_blank(self):
         workbook = self._upload_workbook()
         worksheet = workbook[VALIDATION_LIST_SHEET]
@@ -1190,6 +1261,7 @@ class ValidationUploadParserTest(TestCase):
         self.assertIn("Row 2: verified must be YES or NO", parsed.errors)
         self.assertIn("Row 2: primary_worker must be YES or NO", parsed.errors)
         self.assertIn("Row 2: validation_date is invalid", parsed.errors)
+        self.assertEqual(parsed.error_row_numbers, frozenset({2}))
 
     def test_parse_validation_workbook_rejects_unknown_project_names(self):
         workbook = self._upload_workbook()
@@ -1687,6 +1759,7 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(set(rejections), {"group-1"})
         self.assertEqual(rejections["group-1"]["row_count"], 2)
+        self.assertEqual(rejections["group-1"]["row_numbers"], {2, 3})
 
     def test_primary_worker_preflight_accepts_explicit_worker_transfer(self):
         group = self._group_with_primary_workers(True, False)
@@ -1732,6 +1805,52 @@ class UploadHardeningTest(TestCase):
         self.assertEqual(result["errors"], 2)
         self.assertEqual(result["error_messages"], [])
         create_batch_mock.assert_not_called()
+
+    @patch("household_validation.services.parse_validation_workbook")
+    def test_dry_run_does_not_double_count_parse_and_household_rejection(
+        self,
+        parse_workbook_mock,
+    ):
+        rows = [
+            self._uploaded_row(2, "member-1", True),
+            self._uploaded_row(3, "member-2", True),
+        ]
+        parse_workbook_mock.return_value = SimpleNamespace(
+            rows=rows,
+            rows_read=2,
+            errors=["Row 2: invalid value"],
+            error_row_numbers=frozenset({2}),
+        )
+        group = self._group_with_primary_workers(False, False)
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+        ):
+            result = service.upload(b"workbook", dry_run=True)
+
+        self.assertEqual(result["errors"], 2)
+
+    def test_primary_worker_rejection_explains_reason(self):
+        service = HouseholdValidationUploadService()
+        uploaded_row = self._uploaded_row(2, "member-1", True)
+
+        with (
+            patch.object(service, "_group", return_value=None),
+            patch.object(service, "_group_individual", return_value=None),
+            patch.object(service, "_project", return_value=None),
+            patch.object(service, "_save_batch_row") as save_row_mock,
+        ):
+            service._save_primary_worker_rejection(
+                uploaded_row,
+                batch=MagicMock(),
+            )
+
+        self.assertEqual(
+            save_row_mock.call_args.kwargs["error_message"],
+            "Rejected: household would have more than one primary worker",
+        )
 
     @patch("household_validation.services.parse_validation_workbook")
     def test_upload_rejects_every_row_without_partial_household_updates(
