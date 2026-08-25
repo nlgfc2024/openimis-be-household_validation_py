@@ -54,10 +54,11 @@ Enrollment remains a reference workflow only. This module does not call enrollme
 
 1. **Sort.** Eligible households (at least one fit-for-work member; not excluded by `excludeVerifiedAfter`) are sorted by `household_wealth_quintile` ascending — `Poorest` first, `Richest` last. This quintile is the available proxy for PMT score (there is no separate numeric PMT field on the household); households within the same quintile are ordered by code/id.
 2. **Categorize.** Each household is tagged with exactly one category: `FEMALE_HEADED` (head is female), `YOUTH` (no female head, but at least one eligible member aged 18-35), or `OTHER` (neither).
-3. **Split `targetCount` into quotas.** The requested main-list size (`targetCount`, or every eligible household if omitted) is split into three quotas by percentage: **40% female-headed, 40% youth-headed, 20% other**, by default. Only the female-headed and youth-headed percentages are configured values (see below) — there is no separate "other" percentage setting anywhere. The "other" quota is *always computed live* as `100% - femaleHeadedPercentage - youthPercentage`, so it stays correct for any configured pair, not just the 40/40 default: e.g. 30/30 leaves 40% for other, 45/45 leaves 10%. If the two configured percentages together exceed 100%, they're scaled down proportionally so their sum is exactly 100% and "other" is 0% — the three quotas can never sum to anything but the full `targetCount`.
-4. **Fill each quota from its own PMT-sorted pool**, taking the female-headed pool first, then youth, then other. Because the three pools are disjoint and each quota is filled independently, this order only affects row order in the exported list, not which households are ultimately selected.
-5. **Backfill any shortfall.** If a category's pool can't fill its own quota (e.g. too few youth-headed households in the filtered area), the gap is backfilled from whatever eligible households remain, still walked in PMT order — so the main list reaches `targetCount` as long as enough eligible households exist in total, even if the 40/40/20 split isn't hit exactly for that run.
-6. **Build the reserve/waiting list.** Once the main list is filled, the reserve list is drawn from the households still left over, continuing in the *same* PMT-sorted order (not a fresh sort) — so the waiting list is a direct continuation of the main list's ranking. Its size defaults to **20%** of the main list size, capped by whatever eligible households remain.
+3. **Allocate the target between villages.** For micro-catchment and hotspot requests with an explicit `targetCount`, eligible households are grouped by village and the target is distributed proportionally using the largest-remainder method. When the target is at least the number of villages containing eligible households, every such village receives at least one place. Rounding always preserves the exact overall target. Requests outside micro-catchment/hotspot selection retain the original catchment-wide pool behavior.
+4. **Split each village allocation into category quotas.** Each village's requested main-list size is split into three quotas by percentage: **40% female-headed, 40% youth-headed, 20% other**, by default. Only the female-headed and youth-headed percentages are configured values (see below) — there is no separate "other" percentage setting anywhere. The "other" quota is *always computed live* as `100% - femaleHeadedPercentage - youthPercentage`. If the two configured percentages together exceed 100%, they're scaled down proportionally so their sum is exactly 100% and "other" is 0%.
+5. **Fill each quota from its village's PMT-sorted pools**, taking the female-headed pool first, then youth, then other. Because the three pools are disjoint and each quota is filled independently, this order only affects row order in the exported list, not which households are ultimately selected.
+6. **Backfill any shortfall.** If a category's pool cannot fill its quota, the gap is filled from the remaining eligible households in the same village, still in PMT order. Proportional allocation is capacity-aware, so the combined main list reaches `targetCount` whenever the selected area contains enough eligible households.
+7. **Build the reserve/waiting list.** Reserve places default to **20%** of the main-list target and are distributed proportionally across villages from households not selected for the main list. Main and reserve households cannot overlap.
 
 None of the three percentages are GraphQL arguments on `generateHouseholdValidationList` — they're read from `ModuleConfiguration` for the `household_validation` module (see the "Permissions" section below), so they can be retuned without a code deploy.
 
@@ -315,15 +316,17 @@ Expected upload behavior:
 - `verified = YES` stores `validation_status = VERIFIED` on `Group.Json_ext`.
 - `verified = NO` stores `validation_status = NOT_VERIFIED` on `Group.Json_ext`.
 - `primary_worker = YES/NO` stores the worker flag on `GroupIndividual.Json_ext` without changing `recipient_type`.
+- Before applying any rows, upload projects the final primary-worker state of each household from the database plus the workbook values. A household that would have more than one primary worker is rejected in full; other households continue processing.
 - Project selection is stored as validation intent/prospect metadata only.
 - Upload does not create `GroupBeneficiaryProjectEnrollment` records.
-- Protected workbook fields such as household/member identifiers, location labels, member details, fit-for-work, head, and current recipient values are checked for tampering.
+- Protected workbook fields such as household/member identifiers, location labels, member details, fit-for-work, and head are checked for tampering.
 
 ## Verified Extended Requirements
 
 Implemented and verified in the integration extension:
 
 - `generateHouseholdValidationList` returns card statistics for the validation-list UI inline on the same response as the exported workbook, so no separate summary query is needed.
+- `totalHouseholds` and `totalIndividuals` cover the complete selected micro-catchment using its most specific active mapping (hotspot villages, then GVHs, then TAs); optional location filters narrow selection only and do not change these headline totals.
 - `householdValidationPreview` returns paged preview rows for selected household/member rows.
 - `generateHouseholdValidationList` and `householdValidationPreview` accept the same region/location filters.
 - Generation and preview share the same eligible-household selection service.

@@ -66,18 +66,41 @@ class HouseholdValidationUploadService:
             "households_verified": 0,
             "households_not_verified": 0,
             "participant_updates": 0,
+            "households_with_multiple_primary_workers": 0,
             "errors": len(parsed.errors),
             "error_messages": list(parsed.errors),
         }
+        primary_worker_rejections = self._primary_worker_rejections(
+            parsed.rows
+        )
+        totals["households_with_multiple_primary_workers"] = len(
+            primary_worker_rejections
+        )
+        totals["errors"] += sum(
+            rejection["row_count"]
+            for rejection in primary_worker_rejections.values()
+        )
         if dry_run:
             return totals
 
-        batch = self._get_or_create_batch(parsed, source_file_name=source_file_name)
+        batch = self._get_or_create_batch(
+            parsed,
+            source_file_name=source_file_name,
+        )
         uploaded_at = timezone.now()
         upload_date = _local_date(uploaded_at)
 
         with transaction.atomic():
             for uploaded_row in parsed.rows:
+                primary_worker_rejection = primary_worker_rejections.get(
+                    self._uploaded_group_key(uploaded_row)
+                )
+                if primary_worker_rejection:
+                    self._save_primary_worker_rejection(
+                        uploaded_row,
+                        batch=batch,
+                    )
+                    continue
                 row_errors = self._apply_row(
                     uploaded_row,
                     batch=batch,
@@ -100,6 +123,98 @@ class HouseholdValidationUploadService:
             batch.error_summary = "\n".join(totals["error_messages"]) or None
             batch.save(user=self.user)
         return totals
+
+    def _primary_worker_rejections(self, uploaded_rows):
+        rows_by_group = {}
+        for uploaded_row in uploaded_rows:
+            rows_by_group.setdefault(
+                self._uploaded_group_key(uploaded_row),
+                [],
+            ).append(uploaded_row)
+
+        rejections = {}
+        for group_key, group_rows in rows_by_group.items():
+            group = self._group(group_rows[0].values["group_uuid"])
+            if group is None:
+                continue
+
+            projected = {
+                str(group_individual.individual_id): is_truthy(
+                    (group_individual.json_ext or {}).get("primary_worker")
+                )
+                for group_individual in self._active_group_members(group)
+            }
+            for uploaded_row in group_rows:
+                if uploaded_row.primary_worker is None:
+                    continue
+                group_individual = self._group_individual(
+                    uploaded_row.values["member_uuid"],
+                    group=group,
+                )
+                if group_individual is None:
+                    continue
+                if self._structural_errors(
+                    uploaded_row,
+                    group,
+                    group_individual=group_individual,
+                ):
+                    continue
+                if (
+                    uploaded_row.project_id
+                    and self._project(uploaded_row.project_id) is None
+                ):
+                    continue
+                projected[str(group_individual.individual_id)] = (
+                    uploaded_row.primary_worker
+                )
+
+            primary_worker_count = sum(projected.values())
+            if primary_worker_count <= 1:
+                continue
+
+            rejections[group_key] = {
+                "row_count": len(group_rows),
+            }
+        return rejections
+
+    def _active_group_members(self, group):
+        prefetched_members = getattr(
+            group,
+            "_prefetched_objects_cache",
+            {},
+        ).get("groupindividuals")
+        if prefetched_members is not None:
+            return [
+                member
+                for member in prefetched_members
+                if not member.is_deleted
+            ]
+        return list(
+            GroupIndividual.objects.filter(
+                group=group,
+                is_deleted=False,
+            ).select_related("individual")
+        )
+
+    def _save_primary_worker_rejection(self, uploaded_row, batch):
+        group = self._group(uploaded_row.values["group_uuid"])
+        group_individual = self._group_individual(
+            uploaded_row.values["member_uuid"],
+            group=group,
+        )
+        self._save_batch_row(
+            batch=batch,
+            uploaded_row=uploaded_row,
+            group=group,
+            group_individual=group_individual,
+            project=self._project(uploaded_row.project_id),
+            status=HouseholdValidationBatchRow.Status.ERROR,
+            error_message="Rejected",
+        )
+
+    @staticmethod
+    def _uploaded_group_key(uploaded_row):
+        return str(uploaded_row.values.get("group_uuid") or "").strip()
 
     def _get_or_create_batch(self, parsed, source_file_name=None):
         batch_id = self._batch_id(parsed)
@@ -475,6 +590,12 @@ class EligibleHouseholdSelectionService:
             candidates,
             target_count=target_count,
             exclude_verified_after=exclude_verified_after,
+            allocate_by_village=bool(
+                catchment_id
+                or catchment_code
+                or hotspot_id
+                or hotspot_code
+            ),
         )
         return selection_result
 
@@ -527,34 +648,67 @@ class EligibleHouseholdSelectionService:
         ``SelectionResult`` to export the workbook, and the summary counts inline
         on the same response, so callers get a single request/response.
         """
-        queryset = self._base_queryset()
-        queryset = self._apply_location_filters(
-            queryset,
-            region_id=filters.get("region_id"),
-            region_code=filters.get("region_code"),
-            district_id=filters.get("district_id"),
-            district_code=filters.get("district_code"),
-            ta_id=filters.get("ta_id"),
-            ta_code=filters.get("ta_code"),
-            ta_codes=filters.get("ta_codes"),
-            gvh_codes=filters.get("gvh_codes"),
-            village_id=filters.get("village_id"),
-            village_code=filters.get("village_code"),
-            village_codes=filters.get("village_codes"),
-            hotspot_id=filters.get("hotspot_id"),
-            hotspot_code=filters.get("hotspot_code"),
-            catchment_id=filters.get("catchment_id"),
-            catchment_code=filters.get("catchment_code"),
-        )
+        base_queryset = self._base_queryset()
+        catchment_id = filters.get("catchment_id")
+        catchment_code = filters.get("catchment_code")
+
+        # The headline totals always describe the complete selected micro-
+        # catchment. Optional TA/GVH/hotspot/village filters narrow only the
+        # validation selection and must not change those two totals.
+        if catchment_id or catchment_code:
+            catchment_queryset = self._apply_micro_catchment_scope(
+                base_queryset,
+                catchment_id=catchment_id,
+                catchment_code=catchment_code,
+            )
+            queryset = self._apply_location_filters(
+                catchment_queryset,
+                region_id=filters.get("region_id"),
+                region_code=filters.get("region_code"),
+                district_id=filters.get("district_id"),
+                district_code=filters.get("district_code"),
+                ta_id=filters.get("ta_id"),
+                ta_code=filters.get("ta_code"),
+                ta_codes=filters.get("ta_codes"),
+                gvh_codes=filters.get("gvh_codes"),
+                village_id=filters.get("village_id"),
+                village_code=filters.get("village_code"),
+                village_codes=filters.get("village_codes"),
+                hotspot_id=filters.get("hotspot_id"),
+                hotspot_code=filters.get("hotspot_code"),
+            )
+            total_groups = list(catchment_queryset)
+        else:
+            queryset = self._apply_location_filters(
+                base_queryset,
+                region_id=filters.get("region_id"),
+                region_code=filters.get("region_code"),
+                district_id=filters.get("district_id"),
+                district_code=filters.get("district_code"),
+                ta_id=filters.get("ta_id"),
+                ta_code=filters.get("ta_code"),
+                ta_codes=filters.get("ta_codes"),
+                gvh_codes=filters.get("gvh_codes"),
+                village_id=filters.get("village_id"),
+                village_code=filters.get("village_code"),
+                village_codes=filters.get("village_codes"),
+                hotspot_id=filters.get("hotspot_id"),
+                hotspot_code=filters.get("hotspot_code"),
+            )
+            total_groups = list(queryset)
+
         groups = list(queryset)
-        total_households = len(groups)
-        total_individuals = 0
+        total_households = len(total_groups)
+        total_individual_ids = {
+            member.individual_id
+            for group in total_groups
+            for member in group.groupindividuals.all()
+            if self._is_active_group_individual(member)
+        }
+        total_individuals = len(total_individual_ids)
         eligible_individuals = 0
         candidates = []
         for group in groups:
-            total_individuals += len(
-                [member for member in group.groupindividuals.all() if not member.is_deleted]
-            )
             household = self._build_household(group)
             if household is None:
                 continue
@@ -565,6 +719,12 @@ class EligibleHouseholdSelectionService:
             candidates,
             target_count=filters.get("target_count"),
             exclude_verified_after=filters.get("exclude_verified_after"),
+            allocate_by_village=bool(
+                catchment_id
+                or catchment_code
+                or filters.get("hotspot_id")
+                or filters.get("hotspot_code")
+            ),
         )
         summary = {
             "total_households": total_households,
@@ -584,8 +744,10 @@ class EligibleHouseholdSelectionService:
         ]
 
     def _base_queryset(self):
-        queryset = Group.objects.select_related("location").prefetch_related(
-            "groupindividuals__individual",
+        queryset = (
+            Group.objects.filter(is_deleted=False)
+            .select_related("location")
+            .prefetch_related("groupindividuals__individual")
         )
         if self.user is not None:
             queryset = Group.get_queryset(queryset, self.user)
@@ -610,6 +772,13 @@ class EligibleHouseholdSelectionService:
         catchment_id=None,
         catchment_code=None,
     ):
+        if catchment_id or catchment_code:
+            queryset = self._apply_micro_catchment_scope(
+                queryset,
+                catchment_id=catchment_id,
+                catchment_code=catchment_code,
+            )
+
         # Accept both the legacy singular ``village_code`` and the plural
         # ``village_codes`` list; merge them into a single code set.
         codes = list(village_codes or [])
@@ -663,37 +832,6 @@ class EligibleHouseholdSelectionService:
                 )
             return queryset.filter(ta_filter)
 
-        # A micro-catchment spans a set of TAs and/or GVHs within a district.
-        if catchment_id or catchment_code:
-            micro_catchment = self._resolve_micro_catchment(catchment_id, catchment_code)
-            if micro_catchment is None:
-                return queryset.none()
-            catchment_ta_codes = list(
-                micro_catchment.traditional_authorities.filter(
-                    validity_to__isnull=True,
-                ).values_list("location__code", flat=True)
-            )
-            catchment_gvh_codes = list(
-                micro_catchment.gvhs.filter(
-                    validity_to__isnull=True,
-                ).values_list("location__code", flat=True)
-            )
-            catchment_filter = Q()
-            if catchment_ta_codes:
-                catchment_filter |= (
-                    Q(location__code__in=catchment_ta_codes)
-                    | Q(location__parent__code__in=catchment_ta_codes)
-                    | Q(location__parent__parent__code__in=catchment_ta_codes)
-                )
-            if catchment_gvh_codes:
-                catchment_filter |= (
-                    Q(location__code__in=catchment_gvh_codes)
-                    | Q(location__parent__code__in=catchment_gvh_codes)
-                )
-            if not catchment_filter:
-                return queryset.none()
-            return queryset.filter(catchment_filter)
-
         if district_id or district_code:
             district_filter = Q()
             if district_id:
@@ -730,6 +868,61 @@ class EligibleHouseholdSelectionService:
             return queryset.filter(region_filter)
         return queryset
 
+    def _apply_micro_catchment_scope(
+        self,
+        queryset,
+        catchment_id=None,
+        catchment_code=None,
+    ):
+        micro_catchment = self._resolve_micro_catchment(catchment_id, catchment_code)
+        if micro_catchment is None:
+            return queryset.none()
+        location_filter = self._micro_catchment_location_filter(micro_catchment)
+        if location_filter is None:
+            return queryset.none()
+        return queryset.filter(location_filter)
+
+    def _micro_catchment_location_filter(self, micro_catchment):
+        """Return the most specific active location coverage for a catchment."""
+        village_codes = list(
+            Hotspot.objects.filter(
+                micro_catchment=micro_catchment,
+                validity_to__isnull=True,
+                village_links__validity_to__isnull=True,
+                village_links__location__validity_to__isnull=True,
+            )
+            .values_list("village_links__location__code", flat=True)
+            .distinct()
+        )
+        if village_codes:
+            return Q(location__code__in=village_codes)
+
+        gvh_codes = list(
+            micro_catchment.gvhs.filter(
+                validity_to__isnull=True,
+                location__validity_to__isnull=True,
+            ).values_list("location__code", flat=True)
+        )
+        if gvh_codes:
+            return (
+                Q(location__code__in=gvh_codes)
+                | Q(location__parent__code__in=gvh_codes)
+            )
+
+        ta_codes = list(
+            micro_catchment.traditional_authorities.filter(
+                validity_to__isnull=True,
+                location__validity_to__isnull=True,
+            ).values_list("location__code", flat=True)
+        )
+        if ta_codes:
+            return (
+                Q(location__code__in=ta_codes)
+                | Q(location__parent__code__in=ta_codes)
+                | Q(location__parent__parent__code__in=ta_codes)
+            )
+        return None
+
     def _resolve_hotspot(self, hotspot_id, hotspot_code):
         identity_filter = Q()
         if hotspot_id:
@@ -751,7 +944,11 @@ class EligibleHouseholdSelectionService:
         return MicroCatchment.objects.filter(identity_filter, validity_to__isnull=True).first()
 
     def _build_household(self, group):
-        groupindividuals = list(group.groupindividuals.all())
+        groupindividuals = [
+            group_individual
+            for group_individual in group.groupindividuals.all()
+            if self._is_active_group_individual(group_individual)
+        ]
         eligible_members = []
         for group_individual in groupindividuals:
             member = self._build_member(group_individual)
@@ -771,6 +968,8 @@ class EligibleHouseholdSelectionService:
         )
 
         group_json_ext = group.json_ext or {}
+        location = getattr(group, "location", None)
+        village = location if getattr(location, "type", None) == "V" else None
 
         return EligibleHousehold(
             id=group.id,
@@ -781,6 +980,17 @@ class EligibleHouseholdSelectionService:
             head=head,
             eligible_members=eligible_members,
             source=group,
+            village_id=getattr(village, "id", None),
+            village_code=getattr(village, "code", None),
+            village_name=getattr(village, "name", None),
+        )
+
+    def _is_active_group_individual(self, group_individual):
+        individual = getattr(group_individual, "individual", None)
+        return (
+            not getattr(group_individual, "is_deleted", False)
+            and individual is not None
+            and not getattr(individual, "is_deleted", False)
         )
 
     def _find_head(self, group, groupindividuals):
