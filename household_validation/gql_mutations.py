@@ -21,6 +21,18 @@ from household_validation.services import (
 )
 
 
+class HouseholdValidationVillageBreakdownGQLType(graphene.ObjectType):
+    village_id = graphene.String()
+    village_code = graphene.String()
+    village_name = graphene.String()
+    eligible_households = graphene.Int()
+    exact_allocation = graphene.Float()
+    allocated_households = graphene.Int()
+    selected_households = graphene.Int()
+    selected_individuals = graphene.Int()
+    reserve_households = graphene.Int()
+
+
 class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
     batch_id = graphene.UUID()
     file_name = graphene.String()
@@ -35,6 +47,7 @@ class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
     selected_youth_households = graphene.Int()
     selected_other_households = graphene.Int()
     reserve_households = graphene.Int()
+    village_breakdown = graphene.List(HouseholdValidationVillageBreakdownGQLType)
     generated_at = graphene.DateTime()
 
 
@@ -43,6 +56,7 @@ class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     households_verified = graphene.Int()
     households_not_verified = graphene.Int()
     participant_updates = graphene.Int()
+    households_with_multiple_primary_workers = graphene.Int()
     errors = graphene.Int()
     error_messages = graphene.List(graphene.String)
 

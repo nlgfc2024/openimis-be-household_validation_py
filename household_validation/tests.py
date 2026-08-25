@@ -1,12 +1,20 @@
+import base64
+from contextlib import nullcontext
 from datetime import date, datetime, timezone as datetime_timezone
 from io import BytesIO
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import MagicMock, call, patch
+from uuid import uuid4
 
 from django.db.models import Q
+from django.test import TestCase as DjangoTestCase
 from django.utils import timezone
 from openpyxl import Workbook, load_workbook
+
+from core.models import User
+from individual.models import Group, GroupIndividual, Individual
+from location.models import Hotspot, HotspotVillage, Location, MicroCatchment
 
 from household_validation.apps import (
     DEFAULT_CONFIG,
@@ -36,6 +44,7 @@ from household_validation.gql_permissions import (
     HouseholdValidationPermissionError,
     require_permissions,
 )
+from household_validation.gql_mutations import GenerateHouseholdValidationListMutation
 from household_validation.project_lookup import (
     ACTIVE_PROJECT_STATUSES,
     ProjectOption,
@@ -60,6 +69,7 @@ from household_validation.services import (
     _json_safe,
     _local_date,
 )
+from household_validation.schema import Query
 from household_validation.upload import (
     PROJECT_SELECTION_TYPE_INTENT,
     UploadedValidationRow,
@@ -161,6 +171,9 @@ def _household(
     eligible_member_age=40,
     last_verified_date=None,
     eligible_members=None,
+    village_id=None,
+    village_code=None,
+    village_name=None,
 ):
     head = _member(
         f"{household_id}-head",
@@ -183,10 +196,120 @@ def _household(
         last_verified_date=last_verified_date,
         head=head,
         eligible_members=eligible_members,
+        village_id=village_id,
+        village_code=village_code,
+        village_name=village_name,
     )
 
 
 class HouseholdSelectionTest(TestCase):
+    def test_select_households_allocates_target_proportionally_by_village(self):
+        households = (
+            [
+                _household(f"a-{index}", "Poorest", village_code="A", village_name="Village A")
+                for index in range(30)
+            ]
+            + [
+                _household(f"b-{index}", "Poorest", village_code="B", village_name="Village B")
+                for index in range(15)
+            ]
+            + [
+                _household(f"c-{index}", "Poorest", village_code="C", village_name="Village C")
+                for index in range(10)
+            ]
+        )
+
+        result, summary = select_households(
+            households,
+            target_count=20,
+            allocate_by_village=True,
+        )
+
+        selected_by_village = {
+            code: len([
+                row
+                for row in result.main
+                if row.household.village_code == code
+            ])
+            for code in ("A", "B", "C")
+        }
+        self.assertEqual(selected_by_village, {"A": 11, "B": 5, "C": 4})
+        self.assertEqual(summary["selected_households"], 20)
+        self.assertEqual(
+            {
+                row["village_code"]: row["allocated_households"]
+                for row in summary["village_breakdown"]
+            },
+            {"A": 11, "B": 5, "C": 4},
+        )
+
+    def test_village_allocation_guarantees_one_household_when_target_allows(self):
+        households = (
+            [
+                _household(f"a-{index}", "Poorest", village_code="A")
+                for index in range(98)
+            ]
+            + [_household("b-1", "Poorest", village_code="B")]
+            + [_household("c-1", "Poorest", village_code="C")]
+        )
+
+        result, _ = select_households(
+            households,
+            target_count=3,
+            allocate_by_village=True,
+        )
+
+        self.assertEqual(
+            {row.household.village_code for row in result.main},
+            {"A", "B", "C"},
+        )
+
+    def test_village_reserve_is_proportional_and_excludes_main_households(self):
+        households = [
+            _household(
+                f"{code}-{index}",
+                "Poorest",
+                village_code=code,
+            )
+            for code in ("A", "B")
+            for index in range(10)
+        ]
+
+        with patch.object(HouseholdValidationConfig, "reserve_percentage", 20):
+            result, summary = select_households(
+                households,
+                target_count=10,
+                allocate_by_village=True,
+            )
+
+        self.assertEqual(
+            {
+                code: len([
+                    row
+                    for row in result.main
+                    if row.household.village_code == code
+                ])
+                for code in ("A", "B")
+            },
+            {"A": 5, "B": 5},
+        )
+        self.assertEqual(
+            {
+                code: len([
+                    row
+                    for row in result.reserve
+                    if row.household.village_code == code
+                ])
+                for code in ("A", "B")
+            },
+            {"A": 1, "B": 1},
+        )
+        self.assertFalse(
+            {row.household.id for row in result.main}
+            & {row.household.id for row in result.reserve}
+        )
+        self.assertEqual(summary["reserve_households"], 2)
+
     def test_select_households_applies_quota_categories(self):
         households = [
             _household("female", "Poorest", head_gender="Female"),
@@ -443,6 +566,38 @@ class HouseholdValidationPreviewServiceTest(TestCase):
             summary["selected_individuals"],
         )
 
+    def test_generate_totals_cover_full_catchment_before_optional_filters(self):
+        catchment_groups = [
+            _fake_group("group-1", "HH-001", "Female", 30, "Poorest"),
+            _fake_group("group-2", "HH-002", "Male", 22, "Poorer"),
+        ]
+        service = _FakeSelectionService(catchment_groups)
+        filtered_queryset = _FakeQuerySet([catchment_groups[0]])
+
+        with (
+            patch.object(
+                service,
+                "_apply_micro_catchment_scope",
+                return_value=_FakeQuerySet(catchment_groups),
+            ) as catchment_scope_mock,
+            patch.object(
+                service,
+                "_apply_location_filters",
+                return_value=filtered_queryset,
+            ),
+        ):
+            _, summary = service.generate(
+                catchment_code="MC01",
+                village_codes=["V01"],
+                target_count=1,
+            )
+
+        catchment_scope_mock.assert_called_once()
+        self.assertEqual(summary["total_households"], 2)
+        self.assertEqual(summary["total_individuals"], 2)
+        self.assertEqual(summary["eligible_households"], 1)
+        self.assertEqual(summary["selected_households"], 1)
+
     def test_preview_rows_include_location_and_validation_fields(self):
         service = _FakeSelectionService(
             [
@@ -552,32 +707,50 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
 
         resolve_mock.assert_not_called()
 
-    def test_scopes_to_micro_catchment_tas_and_gvhs(self):
+    def test_scopes_to_micro_catchment_hotspot_villages_before_broader_links(self):
         service = EligibleHouseholdSelectionService()
         micro_catchment = SimpleNamespace(
-            traditional_authorities=SimpleNamespace(
-                filter=lambda **k: SimpleNamespace(values_list=lambda *a, **k2: ["TA01"]),
-            ),
-            gvhs=SimpleNamespace(
-                filter=lambda **k: SimpleNamespace(values_list=lambda *a, **k2: ["GVH01"]),
-            ),
+            traditional_authorities=MagicMock(),
+            gvhs=MagicMock(),
         )
         queryset = MagicMock()
+        hotspot_queryset = MagicMock()
+        hotspot_queryset.values_list.return_value.distinct.return_value = ["V01", "V02"]
 
-        with patch.object(service, "_resolve_micro_catchment", return_value=micro_catchment) as resolve_mock:
+        with (
+            patch.object(service, "_resolve_micro_catchment", return_value=micro_catchment) as resolve_mock,
+            patch("household_validation.services.Hotspot.objects.filter", return_value=hotspot_queryset),
+        ):
             result = service._apply_location_filters(queryset, catchment_code="MC01")
 
         resolve_mock.assert_called_once_with(None, "MC01")
-        expected_filter = (
-            Q(location__code__in=["TA01"])
-            | Q(location__parent__code__in=["TA01"])
-            | Q(location__parent__parent__code__in=["TA01"])
-        ) | (
-            Q(location__code__in=["GVH01"])
-            | Q(location__parent__code__in=["GVH01"])
-        )
-        queryset.filter.assert_called_once_with(expected_filter)
+        queryset.filter.assert_called_once_with(Q(location__code__in=["V01", "V02"]))
+        micro_catchment.gvhs.filter.assert_not_called()
+        micro_catchment.traditional_authorities.filter.assert_not_called()
         self.assertIs(result, queryset.filter.return_value)
+
+    def test_micro_catchment_falls_back_to_active_gvhs_without_villages(self):
+        service = EligibleHouseholdSelectionService()
+        micro_catchment = SimpleNamespace(
+            gvhs=MagicMock(),
+            traditional_authorities=MagicMock(),
+        )
+        hotspot_queryset = MagicMock()
+        hotspot_queryset.values_list.return_value.distinct.return_value = []
+        micro_catchment.gvhs.filter.return_value.values_list.return_value = ["GVH01"]
+
+        with patch(
+            "household_validation.services.Hotspot.objects.filter",
+            return_value=hotspot_queryset,
+        ):
+            location_filter = service._micro_catchment_location_filter(micro_catchment)
+
+        self.assertEqual(
+            location_filter,
+            Q(location__code__in=["GVH01"])
+            | Q(location__parent__code__in=["GVH01"]),
+        )
+        micro_catchment.traditional_authorities.filter.assert_not_called()
 
     def test_unknown_micro_catchment_yields_no_households(self):
         service = EligibleHouseholdSelectionService()
@@ -589,18 +762,210 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
         queryset.none.assert_called_once()
         self.assertIs(result, queryset.none.return_value)
 
-    def test_explicit_ta_selection_overrides_micro_catchment(self):
+    def test_explicit_ta_selection_is_intersected_with_micro_catchment(self):
         service = EligibleHouseholdSelectionService()
         queryset = MagicMock()
+        catchment_queryset = MagicMock()
+        queryset.filter.return_value = catchment_queryset
+        catchment_filter = Q(location__code__in=["V01"])
 
-        with patch.object(service, "_resolve_micro_catchment") as resolve_mock:
-            service._apply_location_filters(
-                queryset,
-                ta_codes=["TA01"],
-                catchment_code="MC01",
+        with patch.object(
+            service,
+            "_micro_catchment_location_filter",
+            return_value=catchment_filter,
+        ):
+            with patch.object(service, "_resolve_micro_catchment", return_value=SimpleNamespace()):
+                result = service._apply_location_filters(
+                    queryset,
+                    ta_codes=["TA01"],
+                    catchment_code="MC01",
+                )
+
+        queryset.filter.assert_called_once_with(catchment_filter)
+        catchment_queryset.filter.assert_called_once_with(
+            Q(location__code__in=["TA01"])
+            | Q(location__parent__code__in=["TA01"])
+            | Q(location__parent__parent__code__in=["TA01"])
+        )
+        self.assertIs(result, catchment_queryset.filter.return_value)
+
+
+class CatchmentAndHotspotSelectionIntegrationTest(DjangoTestCase):
+    """Prove GraphQL generation and preview exclude out-of-scope households."""
+
+    @classmethod
+    def setUpTestData(cls):
+        cls.audit_user = User.objects.create(username="household-validation-scope-test")
+        cls.district = Location.objects.create(
+            code="HV-TEST-DISTRICT",
+            name="Validation test district",
+            type="R",
+            audit_user_id=1,
+        )
+        cls.ta = Location.objects.create(
+            code="HV-TEST-TA",
+            name="Validation test TA",
+            type="D",
+            parent=cls.district,
+            audit_user_id=1,
+        )
+        cls.gvh = Location.objects.create(
+            code="HV-TEST-GVH",
+            name="Validation test GVH",
+            type="W",
+            parent=cls.ta,
+            audit_user_id=1,
+        )
+        cls.inside_village = Location.objects.create(
+            code="HV-TEST-V-IN",
+            name="Inside village",
+            type="V",
+            parent=cls.gvh,
+            audit_user_id=1,
+        )
+        cls.outside_village = Location.objects.create(
+            code="HV-TEST-V-OUT",
+            name="Outside village",
+            type="V",
+            parent=cls.gvh,
+            audit_user_id=1,
+        )
+        cls.catchment = MicroCatchment.objects.create(
+            code="HV-TEST-MC",
+            name="Validation test micro-catchment",
+            district=cls.district,
+            audit_user_id=1,
+        )
+        cls.hotspot = Hotspot.objects.create(
+            code="HV-TEST-HS",
+            name="Validation test hotspot",
+            micro_catchment=cls.catchment,
+            audit_user_id=1,
+        )
+        HotspotVillage.objects.create(
+            hotspot=cls.hotspot,
+            location=cls.inside_village,
+            audit_user_id=1,
+        )
+        cls.inside_group = cls._create_eligible_household(
+            "HV-HH-IN",
+            cls.inside_village,
+        )
+        cls.outside_group = cls._create_eligible_household(
+            "HV-HH-OUT",
+            cls.outside_village,
+        )
+
+    @classmethod
+    def _create_eligible_household(cls, code, village):
+        group = Group(
+            code=code,
+            location=village,
+            json_ext={
+                "form_number": f"FORM-{code}",
+                "household_wealth_quintile": "Poorest",
+            },
+        )
+        group.save(user=cls.audit_user)
+        individual = Individual(
+            first_name=code,
+            last_name="Worker",
+            dob=date(1990, 1, 1),
+            location=village,
+            json_ext={"fit_for_work": True, "gender": "Male"},
+        )
+        individual.save(user=cls.audit_user)
+        GroupIndividual.objects.bulk_create(
+            [
+                GroupIndividual(
+                    id=uuid4(),
+                    group=group,
+                    individual=individual,
+                    role=GroupIndividual.Role.HEAD,
+                    user_created=cls.audit_user,
+                    user_updated=cls.audit_user,
+                )
+            ]
+        )
+        return group
+
+    def test_micro_catchment_excludes_district_households_from_generation_and_preview_without_ta(self):
+        self._assert_generation_and_preview_scope(
+            catchment_code=self.catchment.code,
+        )
+
+    def test_hotspot_excludes_households_in_other_villages_in_same_district_from_generation_and_preview(self):
+        self._assert_generation_and_preview_scope(
+            hotspot_code=self.hotspot.code,
+        )
+
+    def _assert_generation_and_preview_scope(self, **scope):
+        info = SimpleNamespace(context=SimpleNamespace(user=self.audit_user))
+        filters = {
+            "district_id": self.district.id,
+            "target_count": 10,
+            **scope,
+        }
+        with (
+            patch.object(
+                Group,
+                "get_queryset",
+                side_effect=lambda queryset, user: queryset,
+            ),
+            patch.object(
+                GenerateHouseholdValidationListMutation,
+                "_validate_user",
+            ),
+            patch.object(Query, "_check_permissions"),
+            patch(
+                "household_validation.gql_mutations.HouseholdValidationProjectLookupService.list_projects",
+                return_value=[],
+            ),
+            patch.object(
+                EligibleHouseholdSelectionService,
+                "_project_names",
+                return_value=[],
+            ),
+        ):
+            generated = GenerateHouseholdValidationListMutation.mutate(
+                None,
+                info,
+                **filters,
+            )
+            preview = Query.resolve_household_validation_preview(
+                None,
+                info,
+                **filters,
             )
 
-        resolve_mock.assert_not_called()
+        self.assertEqual(generated.total_households, 1)
+        self.assertEqual(generated.selected_households, 1)
+        self.assertEqual(len(generated.village_breakdown), 1)
+        self.assertEqual(
+            generated.village_breakdown[0]["village_code"],
+            self.inside_village.code,
+        )
+        self.assertEqual(
+            generated.village_breakdown[0]["selected_households"],
+            1,
+        )
+        workbook = load_workbook(
+            BytesIO(base64.b64decode(generated.file_base64)),
+            read_only=True,
+        )
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        headers = [cell.value for cell in worksheet[1]]
+        group_uuid_column = headers.index("group_uuid") + 1
+        generated_group_ids = {
+            str(row[group_uuid_column - 1].value)
+            for row in worksheet.iter_rows(min_row=2)
+        }
+        self.assertEqual(generated_group_ids, {str(self.inside_group.id)})
+        self.assertNotIn(str(self.outside_group.id), generated_group_ids)
+
+        preview_group_codes = {edge.node.group_code for edge in preview.edges}
+        self.assertEqual(preview_group_codes, {self.inside_group.code})
+        self.assertNotIn(self.outside_group.code, preview_group_codes)
 
 
 class _FakeSelectionService(EligibleHouseholdSelectionService):
@@ -918,6 +1283,20 @@ class ExcelValidationListExporterTest(TestCase):
             EXCEL_COLUMNS,
         )
         self.assertIn("primary_worker", EXCEL_COLUMNS)
+        self.assertNotIn("current_recipient_type", EXCEL_COLUMNS)
+        form_number_index = EXCEL_COLUMNS.index("form_number")
+        self.assertEqual(
+            EXCEL_COLUMNS[form_number_index:form_number_index + 7],
+            [
+                "form_number",
+                "member_name",
+                "relationship",
+                "member_dob",
+                "national_id",
+                "primary_worker",
+                "verified",
+            ],
+        )
         self.assertNotIn("participant", EXCEL_COLUMNS)
         self.assertNotIn("group_code", EXCEL_COLUMNS)
         self.assertEqual(worksheet["A2"].value, "batch-1")
@@ -1259,6 +1638,139 @@ class ExcelValidationListExporterTest(TestCase):
 
 
 class UploadHardeningTest(TestCase):
+    @staticmethod
+    def _uploaded_row(row_number, member_uuid, primary_worker):
+        return UploadedValidationRow(
+            row_number=row_number,
+            values={
+                "group_uuid": "group-1",
+                "member_uuid": member_uuid,
+                "form_number": "FORM-001",
+            },
+            verified=True,
+            primary_worker=primary_worker,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+
+    @staticmethod
+    def _group_with_primary_workers(*primary_worker_values):
+        members = [
+            SimpleNamespace(
+                individual_id=f"member-{index}",
+                is_deleted=False,
+                json_ext={"primary_worker": primary_worker},
+            )
+            for index, primary_worker in enumerate(primary_worker_values, start=1)
+        ]
+        return SimpleNamespace(
+            id="group-1",
+            code="HH-001",
+            _prefetched_objects_cache={"groupindividuals": members},
+        )
+
+    def test_primary_worker_preflight_rejects_existing_and_new_primary_worker(self):
+        group = self._group_with_primary_workers(True, False)
+        rows = [
+            self._uploaded_row(2, "member-1", None),
+            self._uploaded_row(3, "member-2", True),
+        ]
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+        ):
+            rejections = service._primary_worker_rejections(rows)
+
+        self.assertEqual(set(rejections), {"group-1"})
+        self.assertEqual(rejections["group-1"]["row_count"], 2)
+
+    def test_primary_worker_preflight_accepts_explicit_worker_transfer(self):
+        group = self._group_with_primary_workers(True, False)
+        rows = [
+            self._uploaded_row(2, "member-1", False),
+            self._uploaded_row(3, "member-2", True),
+        ]
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+        ):
+            rejections = service._primary_worker_rejections(rows)
+
+        self.assertEqual(rejections, {})
+
+    @patch("household_validation.services.parse_validation_workbook")
+    def test_dry_run_reports_unique_rejected_household_without_writes(
+        self,
+        parse_workbook_mock,
+    ):
+        rows = [
+            self._uploaded_row(2, "member-1", True),
+            self._uploaded_row(3, "member-2", True),
+        ]
+        parse_workbook_mock.return_value = SimpleNamespace(
+            rows=rows,
+            rows_read=2,
+            errors=[],
+        )
+        group = self._group_with_primary_workers(False, False)
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+            patch.object(service, "_get_or_create_batch") as create_batch_mock,
+        ):
+            result = service.upload(b"workbook", dry_run=True)
+
+        self.assertEqual(result["households_with_multiple_primary_workers"], 1)
+        self.assertEqual(result["errors"], 2)
+        self.assertEqual(result["error_messages"], [])
+        create_batch_mock.assert_not_called()
+
+    @patch("household_validation.services.parse_validation_workbook")
+    def test_upload_rejects_every_row_without_partial_household_updates(
+        self,
+        parse_workbook_mock,
+    ):
+        rows = [
+            self._uploaded_row(2, "member-1", True),
+            self._uploaded_row(3, "member-2", True),
+        ]
+        parse_workbook_mock.return_value = SimpleNamespace(
+            rows=rows,
+            rows_read=2,
+            errors=[],
+        )
+        group = self._group_with_primary_workers(False, False)
+        batch = MagicMock()
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+            patch.object(service, "_get_or_create_batch", return_value=batch),
+            patch.object(
+                service,
+                "_save_primary_worker_rejection",
+            ) as reject_mock,
+            patch.object(service, "_apply_row") as apply_row_mock,
+            patch(
+                "household_validation.services.transaction.atomic",
+                return_value=nullcontext(),
+            ),
+        ):
+            result = service.upload(b"workbook")
+
+        self.assertEqual(result["households_with_multiple_primary_workers"], 1)
+        self.assertEqual(reject_mock.call_count, 2)
+        apply_row_mock.assert_not_called()
+
     @patch("household_validation.services.GroupIndividualService")
     def test_primary_worker_update_preserves_json_and_recipient_type(
         self,

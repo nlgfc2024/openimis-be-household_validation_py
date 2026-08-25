@@ -51,6 +51,9 @@ class EligibleHousehold:
     head: EligibleMember | None = None
     eligible_members: list[EligibleMember] = field(default_factory=list)
     source: Any = None
+    village_id: Any = None
+    village_code: str | None = None
+    village_name: str | None = None
 
 
 @dataclass(frozen=True)
@@ -209,22 +212,79 @@ def _allocate_quotas(target_count):
     return quotas
 
 
-def select_households(
-    households,
-    target_count=None,
-    exclude_verified_after=None,
-):
-    eligible = [
-        household
-        for household in exclude_recently_verified(households, exclude_verified_after)
-        if household.eligible_members
-    ]
-    eligible = sorted(eligible, key=household_sort_key)
+def _village_key(household):
+    if household.village_code:
+        return f"code:{household.village_code}"
+    if household.village_id is not None:
+        return f"id:{household.village_id}"
+    return "unassigned"
 
-    main_target = len(eligible) if target_count is None else target_count
-    main_target = max(0, min(main_target, len(eligible)))
+
+def _allocate_village_targets(households_by_village, target_count):
+    """Allocate an exact target proportionally, with one slot per village when possible."""
+    capacities = {
+        key: len(households)
+        for key, households in households_by_village.items()
+        if households
+    }
+    target_count = max(0, min(target_count, sum(capacities.values())))
+    if not capacities or target_count == 0:
+        return {key: 0 for key in capacities}, {key: 0.0 for key in capacities}
+
+    total_capacity = sum(capacities.values())
+    exact = {
+        key: target_count * capacity / total_capacity
+        for key, capacity in capacities.items()
+    }
+    allocations = {
+        key: min(capacity, math.floor(exact[key]))
+        for key, capacity in capacities.items()
+    }
+    remaining = target_count - sum(allocations.values())
+    remainder_order = sorted(
+        capacities,
+        key=lambda key: (-(exact[key] - math.floor(exact[key])), str(key)),
+    )
+    while remaining:
+        allocated_in_pass = False
+        for key in remainder_order:
+            if allocations[key] >= capacities[key]:
+                continue
+            allocations[key] += 1
+            remaining -= 1
+            allocated_in_pass = True
+            if remaining == 0:
+                break
+        if not allocated_in_pass:
+            break
+
+    # When there are enough target slots, guarantee representation for every
+    # village containing an eligible household. Preserve the exact total by
+    # moving a slot from the strongest donor rather than adding a new slot.
+    if target_count >= len(capacities):
+        for empty_key in sorted(
+            (key for key, value in allocations.items() if value == 0),
+            key=str,
+        ):
+            donors = [key for key, value in allocations.items() if value > 1]
+            if not donors:
+                break
+            donor_key = max(
+                donors,
+                key=lambda key: (
+                    allocations[key] - exact[key],
+                    allocations[key],
+                    str(key),
+                ),
+            )
+            allocations[donor_key] -= 1
+            allocations[empty_key] += 1
+
+    return allocations, exact
+
+
+def _select_main_households(eligible, main_target):
     quotas = _allocate_quotas(main_target)
-
     by_category = {
         CATEGORY_FEMALE_HEADED: [],
         CATEGORY_YOUTH: [],
@@ -267,23 +327,133 @@ def select_households(
             if len(main) >= main_target:
                 break
 
-    reserve_target = math.ceil(main_target * reserve_percentage() / 100)
-    reserve_target = max(0, min(reserve_target, len(eligible) - len(selected_ids)))
+    return (
+        main,
+        selected_ids,
+        category_counts,
+        selected_individuals,
+        household_categories,
+    )
 
-    reserve = []
-    for household in eligible:
-        if household.id in selected_ids:
-            continue
-        selected_ids.add(household.id)
-        reserve.append(
-            SelectedHousehold(
-                household,
-                household_categories[household.id],
-                ROW_TYPE_RESERVE,
-            )
+
+def select_households(
+    households,
+    target_count=None,
+    exclude_verified_after=None,
+    allocate_by_village=False,
+):
+    eligible = [
+        household
+        for household in exclude_recently_verified(households, exclude_verified_after)
+        if household.eligible_members
+    ]
+    eligible = sorted(eligible, key=household_sort_key)
+
+    main_target = len(eligible) if target_count is None else target_count
+    main_target = max(0, min(main_target, len(eligible)))
+
+    reserve_target = math.ceil(main_target * reserve_percentage() / 100)
+    reserve_target = max(0, min(reserve_target, len(eligible) - main_target))
+
+    village_breakdown = []
+    if allocate_by_village and target_count is not None:
+        households_by_village = {}
+        for household in eligible:
+            households_by_village.setdefault(_village_key(household), []).append(household)
+
+        main_allocations, exact_allocations = _allocate_village_targets(
+            households_by_village,
+            main_target,
         )
-        if len(reserve) >= reserve_target:
-            break
+        main = []
+        selected_ids = set()
+        selected_individuals = 0
+        category_counts = {
+            CATEGORY_FEMALE_HEADED: 0,
+            CATEGORY_YOUTH: 0,
+            CATEGORY_OTHER: 0,
+        }
+        household_categories = {
+            household.id: categorize_household(household)
+            for household in eligible
+        }
+        village_selected_individuals = {}
+        for key in sorted(households_by_village, key=str):
+            village_main, village_ids, village_counts, village_individuals, _ = (
+                _select_main_households(
+                    households_by_village[key],
+                    main_allocations.get(key, 0),
+                )
+            )
+            main.extend(village_main)
+            selected_ids.update(village_ids)
+            selected_individuals += village_individuals
+            village_selected_individuals[key] = village_individuals
+            for category, count in village_counts.items():
+                category_counts[category] += count
+
+        remaining_by_village = {
+            key: [
+                household
+                for household in households
+                if household.id not in selected_ids
+            ]
+            for key, households in households_by_village.items()
+        }
+        reserve_allocations, _reserve_exact = _allocate_village_targets(
+            remaining_by_village,
+            reserve_target,
+        )
+        reserve = []
+        for key in sorted(remaining_by_village, key=str):
+            for household in remaining_by_village[key][:reserve_allocations.get(key, 0)]:
+                selected_ids.add(household.id)
+                reserve.append(
+                    SelectedHousehold(
+                        household,
+                        household_categories[household.id],
+                        ROW_TYPE_RESERVE,
+                    )
+                )
+
+        for key in sorted(households_by_village, key=str):
+            representative = households_by_village[key][0]
+            allocation = main_allocations.get(key, 0)
+            village_breakdown.append(
+                {
+                    "village_id": representative.village_id,
+                    "village_code": representative.village_code,
+                    "village_name": representative.village_name,
+                    "eligible_households": len(households_by_village[key]),
+                    "exact_allocation": round(exact_allocations.get(key, 0), 6),
+                    "allocated_households": allocation,
+                    "selected_households": allocation,
+                    "selected_individuals": village_selected_individuals.get(key, 0),
+                    "reserve_households": reserve_allocations.get(key, 0),
+                }
+            )
+    else:
+        (
+            main,
+            selected_ids,
+            category_counts,
+            selected_individuals,
+            household_categories,
+        ) = _select_main_households(eligible, main_target)
+        reserve = []
+        for household in eligible:
+            if household.id in selected_ids:
+                continue
+            selected_ids.add(household.id)
+            reserve.append(
+                SelectedHousehold(
+                    household,
+                    household_categories[household.id],
+                    ROW_TYPE_RESERVE,
+                )
+            )
+            if len(reserve) >= reserve_target:
+                break
 
     selection_result = SelectionResult(main=main, reserve=reserve)
     summary = {
@@ -293,5 +463,6 @@ def select_households(
         "selected_youth_households": category_counts[CATEGORY_YOUTH],
         "selected_other_households": category_counts[CATEGORY_OTHER],
         "reserve_households": len(reserve),
+        "village_breakdown": village_breakdown,
     }
     return selection_result, summary
