@@ -76,10 +76,13 @@ class HouseholdValidationUploadService:
         totals["households_with_multiple_primary_workers"] = len(
             primary_worker_rejections
         )
-        totals["errors"] += sum(
-            rejection["row_count"]
+        parsed_error_rows = set(getattr(parsed, "error_row_numbers", ()))
+        rejected_rows = {
+            row_number
             for rejection in primary_worker_rejections.values()
-        )
+            for row_number in rejection["row_numbers"]
+        }
+        totals["errors"] += len(rejected_rows - parsed_error_rows)
         if dry_run:
             return totals
 
@@ -174,6 +177,9 @@ class HouseholdValidationUploadService:
 
             rejections[group_key] = {
                 "row_count": len(group_rows),
+                "row_numbers": {
+                    uploaded_row.row_number for uploaded_row in group_rows
+                },
             }
         return rejections
 
@@ -209,7 +215,9 @@ class HouseholdValidationUploadService:
             group_individual=group_individual,
             project=self._project(uploaded_row.project_id),
             status=HouseholdValidationBatchRow.Status.ERROR,
-            error_message="Rejected",
+            error_message=(
+                "Rejected: household would have more than one primary worker"
+            ),
         )
 
     @staticmethod

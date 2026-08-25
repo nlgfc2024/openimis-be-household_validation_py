@@ -27,6 +27,16 @@ EDITABLE_UPLOAD_COLUMNS = {
     "project",
     "validation_notes",
 }
+OPTIONAL_UPLOAD_COLUMNS = {
+    "Micro-Catchment",
+    "Hotspot",
+    "marital_status",
+    "disability",
+    "pmt_score",
+}
+REQUIRED_UPLOAD_COLUMNS = tuple(
+    column for column in EXCEL_COLUMNS if column not in OPTIONAL_UPLOAD_COLUMNS
+)
 STRUCTURAL_UPLOAD_COLUMNS = tuple(
     column for column in EXCEL_COLUMNS if column not in EDITABLE_UPLOAD_COLUMNS
 )
@@ -51,6 +61,7 @@ class UploadedValidationRow:
 class WorkbookParseResult:
     rows: list[UploadedValidationRow] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    error_row_numbers: frozenset[int] = field(default_factory=frozenset)
     project_options: dict = field(default_factory=dict)
 
     @property
@@ -66,7 +77,9 @@ def parse_validation_workbook(file_or_bytes):
 
     worksheet = workbook[VALIDATION_LIST_SHEET]
     headers = _read_headers(worksheet)
-    missing_columns = [column for column in EXCEL_COLUMNS if column not in headers]
+    missing_columns = [
+        column for column in REQUIRED_UPLOAD_COLUMNS if column not in headers
+    ]
     if missing_columns:
         return WorkbookParseResult(
             errors=[f"Missing required columns: {', '.join(missing_columns)}"]
@@ -74,9 +87,16 @@ def parse_validation_workbook(file_or_bytes):
 
     project_options = _read_project_options(workbook)
     rows = []
+    error_row_numbers = set()
     for row_number in range(2, worksheet.max_row + 1):
         values = {
-            column: _cell_value(worksheet.cell(row=row_number, column=headers[column]))
+            column: (
+                _cell_value(
+                    worksheet.cell(row=row_number, column=headers[column])
+                )
+                if column in headers
+                else None
+            )
             for column in EXCEL_COLUMNS
         }
         if _is_blank_row(values):
@@ -106,6 +126,7 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(f"Row {row_number}: project is not in the project options")
         if row_errors:
             errors.extend(row_errors)
+            error_row_numbers.add(row_number)
             continue
         rows.append(
             UploadedValidationRow(
@@ -119,7 +140,12 @@ def parse_validation_workbook(file_or_bytes):
                 notes=_clean(values.get("validation_notes")),
             )
         )
-    return WorkbookParseResult(rows=rows, errors=errors, project_options=project_options)
+    return WorkbookParseResult(
+        rows=rows,
+        errors=errors,
+        error_row_numbers=frozenset(error_row_numbers),
+        project_options=project_options,
+    )
 
 
 def _to_bytes_io(file_or_bytes):

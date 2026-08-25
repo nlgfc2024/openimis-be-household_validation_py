@@ -352,8 +352,9 @@ def select_households(
     main_target = len(eligible) if target_count is None else target_count
     main_target = max(0, min(main_target, len(eligible)))
 
-    reserve_target = math.ceil(main_target * reserve_percentage() / 100)
-    reserve_target = max(0, min(reserve_target, len(eligible) - main_target))
+    requested_reserve_target = math.ceil(
+        main_target * reserve_percentage() / 100
+    )
 
     village_breakdown = []
     if allocate_by_village and target_count is not None:
@@ -392,6 +393,13 @@ def select_households(
             for category, count in village_counts.items():
                 category_counts[category] += count
 
+        reserve_target = max(
+            0,
+            min(
+                requested_reserve_target,
+                len(eligible) - len(selected_ids),
+            ),
+        )
         remaining_by_village = {
             key: [
                 household
@@ -440,6 +448,13 @@ def select_households(
             selected_individuals,
             household_categories,
         ) = _select_main_households(eligible, main_target)
+        reserve_target = max(
+            0,
+            min(
+                requested_reserve_target,
+                len(eligible) - len(selected_ids),
+            ),
+        )
         reserve = []
         for household in eligible:
             if household.id in selected_ids:
