@@ -263,6 +263,8 @@ mutation UploadValidationList($fileBase64: String!) {
     dryRun: true
     sourceFileName: "validation_list.xlsx"
   ) {
+    batchId
+    uploadAttemptId
     rowsRead
     householdsVerified
     householdsNotVerified
@@ -282,6 +284,7 @@ query {
     rows {
       id
       batchId
+      uploadAttemptId
       groupId
       groupIndividualId
       individualId
@@ -294,6 +297,21 @@ query {
       rawRow
       jsonExt
     }
+  }
+}
+```
+
+Each non-dry-run upload receives a unique `uploadAttemptId`. Use it with the
+workbook `batchId` to download rejected households from that upload only:
+
+```graphql
+query {
+  householdValidationRejectedBatchRows(
+    batchId: "BATCH_UUID_HERE"
+    uploadAttemptId: "UPLOAD_ATTEMPT_UUID_HERE"
+  ) {
+    fileName
+    fileBase64
   }
 }
 ```
@@ -315,7 +333,7 @@ Expected upload behavior:
 
 - `verified = YES` stores `validation_status = VERIFIED` on `Group.Json_ext`.
 - `verified = NO` stores `validation_status = NOT_VERIFIED` on `Group.Json_ext`.
-- `primary_worker = YES/NO` stores the worker flag on `GroupIndividual.Json_ext` without changing `recipient_type`.
+- `primary_worker = YES/NO` stores the worker flag on `GroupIndividual.Json_ext` without changing `recipient_type`; unchanged values are skipped and are not included in `participantUpdates`.
 - Before applying any rows, upload projects the final primary-worker state of each household from the database plus the workbook values. A household that would have more than one primary worker is rejected in full; other households continue processing.
 - Project selection is stored as validation intent/prospect metadata only.
 - Upload does not create `GroupBeneficiaryProjectEnrollment` records.

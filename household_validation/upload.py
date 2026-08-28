@@ -21,9 +21,9 @@ VALIDATION_STATUS_VERIFIED = "VERIFIED"
 VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 
 EDITABLE_UPLOAD_COLUMNS = {
+    "national_id",
     "primary_worker",
     "verified",
-    "validation_date",
     "project",
     "validation_notes",
 }
@@ -290,7 +290,6 @@ def member_structural_errors(uploaded_row, group_individual, group=None):
     expected = {
         "form_number": get_household_form_number(group, individual),
         "member_name": _member_name(individual),
-        "national_id": individual_json_ext.get("national_id"),
         "member_gender": individual_json_ext.get("gender"),
         "member_dob": _date_value(getattr(individual, "dob", None)),
         "member_age": _age(getattr(individual, "dob", None)),
@@ -301,7 +300,6 @@ def member_structural_errors(uploaded_row, group_individual, group=None):
     }
     strict_columns = {
         "form_number",
-        "national_id",
         "relationship",
         "household_wealth_quintile",
     }

@@ -5,6 +5,7 @@ from django.core.exceptions import PermissionDenied
 
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
+from household_validation.excel import build_rejected_households_workbook_bytes
 from household_validation.gql_mutations import (
     GenerateHouseholdValidationListMutation,
     UploadHouseholdValidationListMutation,
@@ -96,6 +97,11 @@ class Query(graphene.ObjectType):
         batch_id=graphene.Argument(graphene.UUID, required=True),
         status=graphene.Argument(graphene.String, required=False),
     )
+    household_validation_rejected_batch_rows = graphene.Field(
+        HouseholdValidationBatchRowsGQLType,
+        batch_id=graphene.Argument(graphene.UUID, required=True),
+        upload_attempt_id=graphene.Argument(graphene.UUID, required=True),
+    )
     household_validation_batch_error_report = graphene.Field(
         HouseholdValidationErrorReportGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
@@ -176,6 +182,30 @@ class Query(graphene.ObjectType):
         return HouseholdValidationBatchRowsGQLType(
             rows=rows,
             count=len(rows),
+        )
+
+    def resolve_household_validation_rejected_batch_rows(parent, info, **kwargs):
+        Query._check_permissions(
+            info.context.user,
+            HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+        )
+        rows = list(
+            HouseholdValidationBatchRow.objects.filter(
+                batch_id=kwargs["batch_id"],
+                upload_attempt_id=kwargs["upload_attempt_id"],
+                status=HouseholdValidationBatchRow.Status.ERROR,
+                is_deleted=False,
+            ).order_by("row_number")
+        )
+        report, _ = build_rejected_households_workbook_bytes(rows)
+        return HouseholdValidationBatchRowsGQLType(
+            rows=rows,
+            count=len(rows),
+            file_name=(
+                f"rejected_households_{kwargs['batch_id']}_"
+                f"{kwargs['upload_attempt_id']}.xlsx"
+            ),
+            file_base64=base64.b64encode(report).decode("ascii"),
         )
 
     def resolve_household_validation_batch_error_report(parent, info, **kwargs):

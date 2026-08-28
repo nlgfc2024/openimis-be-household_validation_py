@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass
 from datetime import date
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
@@ -10,7 +10,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from individual.models import Group, GroupIndividual
-from individual.services import GroupIndividualService
+from individual.services import GroupIndividualService, IndividualService
 from location.models import Hotspot, MicroCatchment
 from project_social_protection.models import Project
 
@@ -57,9 +57,11 @@ class HouseholdValidationUploadService:
     def __init__(self, user=None):
         self.user = user
         self._group_cache = {}
+        self._upload_attempt_id = None
 
     def upload(self, file_or_bytes, dry_run=False, source_file_name=None):
         self._group_cache = {}
+        self._upload_attempt_id = None
         parsed = parse_validation_workbook(file_or_bytes)
         totals = {
             "rows_read": parsed.rows_read,
@@ -70,8 +72,12 @@ class HouseholdValidationUploadService:
             "errors": len(parsed.errors),
             "error_messages": list(parsed.errors),
         }
-        primary_worker_rejections = self._primary_worker_rejections(
+        participant_update_group_keys = self._accepted_validation_group_keys(
             parsed.rows
+        )
+        primary_worker_rejections = self._primary_worker_rejections(
+            parsed.rows,
+            eligible_group_keys=participant_update_group_keys,
         )
         totals["households_with_multiple_primary_workers"] = len(
             primary_worker_rejections
@@ -86,48 +92,69 @@ class HouseholdValidationUploadService:
         if dry_run:
             return totals
 
+        self._upload_attempt_id = uuid4()
         batch = self._get_or_create_batch(
             parsed,
             source_file_name=source_file_name,
         )
+        totals["batch_id"] = batch.id
+        totals["upload_attempt_id"] = self._upload_attempt_id
         uploaded_at = timezone.now()
         upload_date = _local_date(uploaded_at)
+        verified_group_ids = set()
+        not_verified_group_ids = set()
 
         with transaction.atomic():
             for uploaded_row in parsed.rows:
-                primary_worker_rejection = primary_worker_rejections.get(
-                    self._uploaded_group_key(uploaded_row)
-                )
+                group_key = self._uploaded_group_key(uploaded_row)
+                primary_worker_rejection = primary_worker_rejections.get(group_key)
                 if primary_worker_rejection:
                     self._save_primary_worker_rejection(
                         uploaded_row,
                         batch=batch,
                     )
                     continue
-                row_errors = self._apply_row(
+                row_errors, participant_updated = self._apply_row(
                     uploaded_row,
                     batch=batch,
                     upload_date=upload_date,
                     uploaded_at=uploaded_at,
+                    allow_participant_update=group_key in participant_update_group_keys,
                 )
                 if row_errors:
                     totals["errors"] += len(row_errors)
                     totals["error_messages"].extend(row_errors)
                     continue
                 if uploaded_row.verified is True:
-                    totals["households_verified"] += 1
+                    verified_group_ids.add(group_key)
                 elif uploaded_row.verified is False:
-                    totals["households_not_verified"] += 1
-                if uploaded_row.primary_worker is not None:
+                    not_verified_group_ids.add(group_key)
+                if participant_updated:
                     totals["participant_updates"] += 1
 
+            totals["households_verified"] = len(verified_group_ids)
+            totals["households_not_verified"] = len(not_verified_group_ids)
             batch.uploaded_at = uploaded_at
             batch.status = self._batch_status(totals)
             batch.error_summary = "\n".join(totals["error_messages"]) or None
             batch.save(user=self.user)
         return totals
 
-    def _primary_worker_rejections(self, uploaded_rows):
+    def _accepted_validation_group_keys(self, uploaded_rows):
+        accepted_group_keys = set()
+        for uploaded_row in uploaded_rows:
+            if uploaded_row.verified is None:
+                continue
+            errors, _, _, _ = self._resolve_row(uploaded_row)
+            if not errors:
+                accepted_group_keys.add(self._uploaded_group_key(uploaded_row))
+        return accepted_group_keys
+
+    def _primary_worker_rejections(
+        self,
+        uploaded_rows,
+        eligible_group_keys=None,
+    ):
         rows_by_group = {}
         for uploaded_row in uploaded_rows:
             rows_by_group.setdefault(
@@ -137,6 +164,11 @@ class HouseholdValidationUploadService:
 
         rejections = {}
         for group_key, group_rows in rows_by_group.items():
+            if (
+                eligible_group_keys is not None
+                and group_key not in eligible_group_keys
+            ):
+                continue
             group = self._group(group_rows[0].values["group_uuid"])
             if group is None:
                 continue
@@ -215,9 +247,8 @@ class HouseholdValidationUploadService:
             group_individual=group_individual,
             project=self._project(uploaded_row.project_id),
             status=HouseholdValidationBatchRow.Status.ERROR,
-            error_message=(
-                "Rejected: household would have more than one primary worker"
-            ),
+            error_message="household has more than one primary worker",
+            error_code="MULTIPLE_PRIMARY_WORKERS",
         )
 
     @staticmethod
@@ -253,7 +284,7 @@ class HouseholdValidationUploadService:
         except ValueError:
             return None
 
-    def _apply_row(self, uploaded_row, batch, upload_date, uploaded_at):
+    def _resolve_row(self, uploaded_row):
         errors = []
         group = self._group(uploaded_row.values["group_uuid"])
         group_individual = self._group_individual(
@@ -277,6 +308,18 @@ class HouseholdValidationUploadService:
         if uploaded_row.project_id and project is None:
             errors.append(f"Row {uploaded_row.row_number}: project was not found")
 
+        return errors, group, group_individual, project
+
+    def _apply_row(
+        self,
+        uploaded_row,
+        batch,
+        upload_date,
+        uploaded_at,
+        allow_participant_update=False,
+    ):
+        errors, group, group_individual, project = self._resolve_row(uploaded_row)
+
         if errors:
             self._save_batch_row(
                 batch=batch,
@@ -287,7 +330,7 @@ class HouseholdValidationUploadService:
                 status=HouseholdValidationBatchRow.Status.ERROR,
                 error_message="\n".join(errors),
             )
-            return errors
+            return errors, False
 
         if uploaded_row.verified is not None:
             self._apply_group_validation(
@@ -297,11 +340,32 @@ class HouseholdValidationUploadService:
                 upload_date=upload_date,
                 uploaded_at=uploaded_at,
             )
-        if uploaded_row.primary_worker is not None:
+        primary_worker_updated = (
+            allow_participant_update
+            and self._primary_worker_changed(
+                group_individual,
+                uploaded_row.primary_worker,
+            )
+        )
+        national_id_updated = (
+            allow_participant_update
+            and "national_id" in uploaded_row.values
+            and self._national_id_changed(
+                group_individual,
+                uploaded_row.values.get("national_id"),
+            )
+        )
+        if primary_worker_updated:
             self._apply_primary_worker(
                 group_individual,
                 uploaded_row.primary_worker,
             )
+        if national_id_updated:
+            self._apply_national_id(
+                group_individual,
+                uploaded_row.values.get("national_id"),
+            )
+        participant_updated = primary_worker_updated or national_id_updated
 
         self._save_batch_row(
             batch=batch,
@@ -313,12 +377,40 @@ class HouseholdValidationUploadService:
                 HouseholdValidationBatchRow.Status.APPLIED
                 if (
                     uploaded_row.verified is not None
-                    or uploaded_row.primary_worker is not None
+                    or participant_updated
                 )
                 else HouseholdValidationBatchRow.Status.SKIPPED
             ),
         )
-        return []
+        return [], participant_updated
+
+    @staticmethod
+    def _primary_worker_changed(group_individual, primary_worker):
+        if primary_worker is None:
+            return False
+        current_value = is_truthy(
+            (group_individual.json_ext or {}).get("primary_worker")
+        )
+        return current_value != primary_worker
+
+    @classmethod
+    def _national_id_changed(cls, group_individual, national_id):
+        individual = getattr(group_individual, "individual", None)
+        if individual is None:
+            return False
+        current_value = (individual.json_ext or {}).get("national_id")
+        return cls._normalize_national_id(current_value) != cls._normalize_national_id(
+            national_id
+        )
+
+    @staticmethod
+    def _normalize_national_id(value):
+        if value is None:
+            return None
+        if isinstance(value, float) and value.is_integer():
+            value = int(value)
+        value = str(value).strip()
+        return value or None
 
     def _apply_group_validation(self, group, uploaded_row, project, upload_date, uploaded_at):
         json_ext = group.json_ext or {}
@@ -345,6 +437,17 @@ class HouseholdValidationUploadService:
             }
         )
 
+    def _apply_national_id(self, group_individual, national_id):
+        individual = group_individual.individual
+        json_ext = dict(individual.json_ext or {})
+        json_ext["national_id"] = self._normalize_national_id(national_id)
+        IndividualService(self.user).update(
+            {
+                "id": individual.id,
+                "json_ext": json_ext,
+            }
+        )
+
     def _save_batch_row(
         self,
         batch,
@@ -354,9 +457,11 @@ class HouseholdValidationUploadService:
         project=None,
         status=HouseholdValidationBatchRow.Status.PENDING,
         error_message=None,
+        error_code=None,
     ):
         batch_row = HouseholdValidationBatchRow(
             batch=batch,
+            upload_attempt_id=self._upload_attempt_id,
             group=group,
             group_individual=group_individual,
             individual=getattr(group_individual, "individual", None),
@@ -371,6 +476,7 @@ class HouseholdValidationUploadService:
                 "primary_worker": uploaded_row.primary_worker,
                 "project_name": uploaded_row.project_name,
                 "validation_notes": uploaded_row.notes,
+                "error_code": error_code,
             },
         )
         batch_row.save(user=self.user)

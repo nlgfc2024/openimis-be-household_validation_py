@@ -70,6 +70,7 @@ class HouseholdValidationBatchRow(HistoryModel):
         models.CASCADE,
         related_name="rows",
     )
+    upload_attempt_id = models.UUIDField(null=True, blank=True, db_index=True)
     group = models.ForeignKey(
         Group,
         models.DO_NOTHING,

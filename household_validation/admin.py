@@ -10,6 +10,7 @@ class HouseholdValidationBatchRowInline(admin.TabularInline):
     model = HouseholdValidationBatchRow
     extra = 0
     fields = (
+        "upload_attempt_id",
         "row_number",
         "group",
         "individual",
@@ -53,6 +54,7 @@ class HouseholdValidationBatchRowAdmin(admin.ModelAdmin):
     list_display = (
         "id",
         "batch",
+        "upload_attempt_id",
         "row_number",
         "group",
         "individual",
@@ -61,7 +63,7 @@ class HouseholdValidationBatchRowAdmin(admin.ModelAdmin):
         "validation_date",
         "status",
     )
-    list_filter = ("status", "verified", "validation_date")
+    list_filter = ("status", "verified", "validation_date", "upload_attempt_id")
     search_fields = (
         "batch__source_file_name",
         "group__code",

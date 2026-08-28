@@ -39,12 +39,14 @@ from household_validation.excel import (
     MICRO_CATCHMENT_COLUMN,
     PROJECT_OPTIONS_SHEET,
     ExcelValidationListExporter,
+    build_rejected_households_workbook_bytes,
 )
 from household_validation.gql_permissions import (
     HouseholdValidationPermissionError,
     require_permissions,
 )
 from household_validation.gql_mutations import GenerateHouseholdValidationListMutation
+from household_validation.models import HouseholdValidationBatchRow
 from household_validation.project_lookup import (
     ACTIVE_PROJECT_STATUSES,
     ProjectOption,
@@ -148,6 +150,105 @@ class HouseholdValidationConfigTest(TestCase):
                 self.assertIn(right, role_rights)
             self.assertIn(RIGHT_GROUP_SEARCH, role_rights)
             self.assertIn(RIGHT_GROUP_UPDATE, role_rights)
+
+
+class RejectedBatchRowsQueryTest(TestCase):
+    @patch("household_validation.schema.HouseholdValidationBatchRow.objects.filter")
+    def test_rejected_rows_use_upload_permission_without_changing_history_query(
+        self,
+        filter_mock,
+    ):
+        user = MagicMock()
+        info = MagicMock()
+        info.context.user = user
+        rejected_row = MagicMock()
+        rejected_row.json_ext = {"error_code": "MULTIPLE_PRIMARY_WORKERS"}
+        rejected_row.raw_row = {
+            "form_number": "FORM-001",
+            "group_uuid": "group-1",
+        }
+        rejected_row.group_id = "group-1"
+        rejected_row.row_number = 2
+        rejected_row.error_message = (
+            "household has more than one primary worker"
+        )
+        upload_attempt_id = "01a03ab4-c5ac-7b78-a485-f321e7d092f8"
+        filter_mock.return_value.order_by.return_value = [rejected_row]
+
+        with patch.object(Query, "_check_permissions") as check_permissions_mock:
+            result = Query.resolve_household_validation_rejected_batch_rows(
+                None,
+                info,
+                batch_id="01a03aae-4896-7f00-9357-78f69fb8e6ca",
+                upload_attempt_id=upload_attempt_id,
+            )
+
+        check_permissions_mock.assert_called_once_with(
+            user,
+            HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+        )
+        filter_mock.assert_called_once_with(
+            batch_id="01a03aae-4896-7f00-9357-78f69fb8e6ca",
+            upload_attempt_id=upload_attempt_id,
+            status=HouseholdValidationBatchRow.Status.ERROR,
+            is_deleted=False,
+        )
+        filter_mock.return_value.order_by.assert_called_once_with("row_number")
+        self.assertEqual(result.rows, [rejected_row])
+        self.assertEqual(result.count, 1)
+        self.assertEqual(
+            result.file_name,
+            (
+                "rejected_households_01a03aae-4896-7f00-9357-78f69fb8e6ca_"
+                "01a03ab4-c5ac-7b78-a485-f321e7d092f8.xlsx"
+            ),
+        )
+        workbook = load_workbook(BytesIO(base64.b64decode(result.file_base64)))
+        self.assertEqual(workbook.active.title, "Rejected Households")
+        self.assertEqual(workbook.active.max_row, 2)
+
+
+class RejectedHouseholdsWorkbookTest(TestCase):
+    def test_contains_only_multiple_primary_worker_rejections(self):
+        rejection_message = (
+            "household has more than one primary worker"
+        )
+        rows = [
+            SimpleNamespace(
+                row_number=4,
+                group_id="group-1",
+                raw_row={"form_number": "FORM-001", "member_name": "Member One"},
+                json_ext={"error_code": "MULTIPLE_PRIMARY_WORKERS"},
+                error_message=rejection_message,
+            ),
+            SimpleNamespace(
+                row_number=5,
+                group_id="group-1",
+                raw_row={"form_number": "FORM-001", "member_name": "Member Two"},
+                json_ext={"error_code": "MULTIPLE_PRIMARY_WORKERS"},
+                error_message=rejection_message,
+            ),
+            SimpleNamespace(
+                row_number=6,
+                group_id="group-2",
+                raw_row={"form_number": "FORM-002", "member_name": "Other Error"},
+                json_ext={"error_code": "MEMBER_NOT_FOUND"},
+                error_message="Member was not found",
+            ),
+        ]
+
+        report, rejected_row_count = build_rejected_households_workbook_bytes(rows)
+        workbook = load_workbook(BytesIO(report))
+        worksheet = workbook["Rejected Households"]
+        values = list(worksheet.values)
+
+        self.assertEqual(rejected_row_count, 1)
+        self.assertEqual(worksheet.max_row, 2)
+        self.assertIn("rejection_reason", values[0])
+        self.assertEqual(values[1][0], "FORM-001")
+        self.assertEqual(values[1][1], "group-1")
+        self.assertEqual(values[1][2], "4, 5")
+        self.assertNotIn("FORM-002", str(values))
 
 
 def _dob_for_age(age):
@@ -1250,17 +1351,14 @@ class ValidationUploadParserTest(TestCase):
         worksheet = workbook[VALIDATION_LIST_SHEET]
         verified_column = EXCEL_COLUMNS.index("verified") + 1
         primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
-        date_column = EXCEL_COLUMNS.index("validation_date") + 1
         worksheet.cell(row=2, column=verified_column, value="MAYBE")
         worksheet.cell(row=2, column=primary_worker_column, value="LATER")
-        worksheet.cell(row=2, column=date_column, value="not-a-date")
 
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
         self.assertEqual(parsed.rows, [])
         self.assertIn("Row 2: verified must be YES or NO", parsed.errors)
         self.assertIn("Row 2: primary_worker must be YES or NO", parsed.errors)
-        self.assertIn("Row 2: validation_date is invalid", parsed.errors)
         self.assertEqual(parsed.error_row_numbers, frozenset({2}))
 
     def test_parse_validation_workbook_rejects_unknown_project_names(self):
@@ -1355,6 +1453,8 @@ class ExcelValidationListExporterTest(TestCase):
             EXCEL_COLUMNS,
         )
         self.assertIn("primary_worker", EXCEL_COLUMNS)
+        self.assertNotIn("head", EXCEL_COLUMNS)
+        self.assertNotIn("validation_date", EXCEL_COLUMNS)
         self.assertNotIn("current_recipient_type", EXCEL_COLUMNS)
         form_number_index = EXCEL_COLUMNS.index("form_number")
         self.assertEqual(
@@ -1386,7 +1486,6 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "disability"), "Not disabled")
         self.assertEqual(self._value(worksheet, "fit_for_work"), "YES")
         self.assertEqual(self._value(worksheet, "relationship"), "HEAD")
-        self.assertEqual(self._value(worksheet, "head"), "YES")
         self.assertEqual(self._value(worksheet, "pmt_score"), -1.234)
         self.assertEqual(
             self._value(worksheet, "household_wealth_quintile"),
@@ -1457,12 +1556,16 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertTrue(worksheet.protection.sheet)
         for column in (
             "group_uuid",
-            "national_id",
             "relationship",
             "household_wealth_quintile",
         ):
             self.assertTrue(self._cell(worksheet, column).protection.locked)
-        for column in ("primary_worker", "verified", "validation_notes"):
+        for column in (
+            "national_id",
+            "primary_worker",
+            "verified",
+            "validation_notes",
+        ):
             self.assertFalse(self._cell(worksheet, column).protection.locked)
 
     def test_export_workbook_writes_one_row_per_selected_eligible_member(self):
@@ -1777,6 +1880,34 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(rejections, {})
 
+    def test_primary_worker_preflight_ignores_unverified_households(self):
+        group = self._group_with_primary_workers(True, False)
+        rows = [
+            UploadedValidationRow(
+                row_number=2,
+                values={
+                    "group_uuid": "group-1",
+                    "member_uuid": "member-2",
+                    "form_number": "FORM-001",
+                },
+                verified=None,
+                primary_worker=True,
+                validation_date=None,
+                project_name=None,
+                project_id=None,
+                notes=None,
+            ),
+        ]
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_group", return_value=group):
+            rejections = service._primary_worker_rejections(
+                rows,
+                eligible_group_keys=set(),
+            )
+
+        self.assertEqual(rejections, {})
+
     @patch("household_validation.services.parse_validation_workbook")
     def test_dry_run_reports_unique_rejected_household_without_writes(
         self,
@@ -1849,7 +1980,26 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(
             save_row_mock.call_args.kwargs["error_message"],
-            "Rejected: household would have more than one primary worker",
+            "household has more than one primary worker",
+        )
+        self.assertEqual(
+            save_row_mock.call_args.kwargs["error_code"],
+            "MULTIPLE_PRIMARY_WORKERS",
+        )
+
+    @patch("household_validation.services.HouseholdValidationBatchRow")
+    def test_saved_rows_are_scoped_to_current_upload_attempt(self, batch_row_mock):
+        service = HouseholdValidationUploadService()
+        service._upload_attempt_id = uuid4()
+
+        service._save_batch_row(
+            batch=MagicMock(),
+            uploaded_row=self._uploaded_row(2, "member-1", True),
+        )
+
+        self.assertEqual(
+            batch_row_mock.call_args.kwargs["upload_attempt_id"],
+            service._upload_attempt_id,
         )
 
     @patch("household_validation.services.parse_validation_workbook")
@@ -1868,6 +2018,7 @@ class UploadHardeningTest(TestCase):
         )
         group = self._group_with_primary_workers(False, False)
         batch = MagicMock()
+        batch.id = "batch-1"
         service = HouseholdValidationUploadService()
 
         with (
@@ -1887,6 +2038,11 @@ class UploadHardeningTest(TestCase):
             result = service.upload(b"workbook")
 
         self.assertEqual(result["households_with_multiple_primary_workers"], 1)
+        self.assertEqual(result["households_verified"], 0)
+        self.assertEqual(result["households_not_verified"], 0)
+        self.assertEqual(result["batch_id"], "batch-1")
+        self.assertEqual(result["upload_attempt_id"], service._upload_attempt_id)
+        self.assertIsNotNone(result["upload_attempt_id"])
         self.assertEqual(reject_mock.call_count, 2)
         apply_row_mock.assert_not_called()
 
@@ -1931,6 +2087,280 @@ class UploadHardeningTest(TestCase):
             ]
         )
         self.assertEqual(group_individual.recipient_type, "SECONDARY")
+
+    @patch("household_validation.services.IndividualService")
+    def test_national_id_update_preserves_individual_json(self, service_class_mock):
+        individual = SimpleNamespace(
+            id="individual-1",
+            json_ext={"existing": "value", "national_id": "OLD-001"},
+        )
+        group_individual = SimpleNamespace(individual=individual)
+        service = HouseholdValidationUploadService()
+
+        service._apply_national_id(group_individual, " NEW-002 ")
+
+        service_class_mock.return_value.update.assert_called_once_with(
+            {
+                "id": "individual-1",
+                "json_ext": {
+                    "existing": "value",
+                    "national_id": "NEW-002",
+                },
+            }
+        )
+
+    def test_apply_row_counts_changed_national_id_as_participant_update(self):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            individual=SimpleNamespace(
+                id="individual-1",
+                json_ext={"national_id": "OLD-001"},
+            ),
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+                "form_number": "FORM-001",
+                "national_id": "NEW-002",
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(
+                service,
+                "_resolve_row",
+                return_value=([], group, group_individual, None),
+            ),
+            patch.object(service, "_apply_national_id") as apply_national_id_mock,
+            patch.object(service, "_save_batch_row") as save_row_mock,
+        ):
+            errors, participant_updated = service._apply_row(
+                uploaded_row,
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+                allow_participant_update=True,
+            )
+
+        self.assertEqual(errors, [])
+        self.assertTrue(participant_updated)
+        apply_national_id_mock.assert_called_once_with(
+            group_individual,
+            "NEW-002",
+        )
+        self.assertEqual(
+            save_row_mock.call_args.kwargs["status"],
+            HouseholdValidationBatchRow.Status.APPLIED,
+        )
+
+    def test_apply_row_updates_only_changed_primary_worker_value(self):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            individual_id="member-1",
+            json_ext={"primary_worker": True},
+        )
+        service = HouseholdValidationUploadService()
+
+        def uploaded_row(primary_worker):
+            return UploadedValidationRow(
+                row_number=2,
+                values={
+                    "group_uuid": "group-1",
+                    "member_uuid": "member-1",
+                    "form_number": "FORM-001",
+                },
+                verified=None,
+                primary_worker=primary_worker,
+                validation_date=None,
+                project_name=None,
+                project_id=None,
+                notes=None,
+            )
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(
+                service,
+                "_group_individual",
+                return_value=group_individual,
+            ),
+            patch.object(service, "_project", return_value=None),
+            patch.object(service, "_structural_errors", return_value=[]),
+            patch.object(service, "_apply_primary_worker") as apply_worker_mock,
+            patch.object(service, "_save_batch_row") as save_row_mock,
+        ):
+            unchanged_errors, unchanged = service._apply_row(
+                uploaded_row(True),
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+            )
+            blank_errors, blank = service._apply_row(
+                uploaded_row(None),
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+            )
+            changed_errors, changed = service._apply_row(
+                uploaded_row(False),
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+                allow_participant_update=True,
+            )
+
+        self.assertEqual(unchanged_errors, [])
+        self.assertFalse(unchanged)
+        self.assertEqual(blank_errors, [])
+        self.assertFalse(blank)
+        self.assertEqual(changed_errors, [])
+        self.assertTrue(changed)
+        apply_worker_mock.assert_called_once_with(group_individual, False)
+        self.assertEqual(
+            [
+                recorded_call.kwargs["status"]
+                for recorded_call in save_row_mock.call_args_list
+            ],
+            [
+                HouseholdValidationBatchRow.Status.SKIPPED,
+                HouseholdValidationBatchRow.Status.SKIPPED,
+                HouseholdValidationBatchRow.Status.APPLIED,
+            ],
+        )
+
+    def test_apply_row_does_not_update_participant_without_accepted_validation(self):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            individual_id="member-1",
+            json_ext={"primary_worker": False},
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+                "form_number": "FORM-001",
+            },
+            verified=None,
+            primary_worker=True,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_group_individual", return_value=group_individual),
+            patch.object(service, "_project", return_value=None),
+            patch.object(service, "_structural_errors", return_value=[]),
+            patch.object(service, "_apply_primary_worker") as apply_worker_mock,
+            patch.object(service, "_save_batch_row") as save_row_mock,
+        ):
+            errors, participant_updated = service._apply_row(
+                uploaded_row,
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+            )
+
+        self.assertEqual(errors, [])
+        self.assertFalse(participant_updated)
+        apply_worker_mock.assert_not_called()
+        self.assertEqual(
+            save_row_mock.call_args.kwargs["status"],
+            HouseholdValidationBatchRow.Status.SKIPPED,
+        )
+
+    def test_only_valid_verified_rows_enable_household_participant_updates(self):
+        verified_row = self._uploaded_row(2, "member-1", True)
+        unverified_row = UploadedValidationRow(
+            row_number=3,
+            values={
+                "group_uuid": "group-2",
+                "member_uuid": "member-2",
+                "form_number": "FORM-002",
+            },
+            verified=None,
+            primary_worker=True,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        invalid_verified_row = UploadedValidationRow(
+            row_number=4,
+            values={
+                "group_uuid": "group-3",
+                "member_uuid": "member-3",
+                "form_number": "FORM-003",
+            },
+            verified=True,
+            primary_worker=True,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        service = HouseholdValidationUploadService()
+
+        with patch.object(
+            service,
+            "_resolve_row",
+            side_effect=[
+                ([], MagicMock(), MagicMock(), None),
+                (["Row 4: member was not found in group"], None, None, None),
+            ],
+        ):
+            accepted = service._accepted_validation_group_keys(
+                [verified_row, unverified_row, invalid_verified_row]
+            )
+
+        self.assertEqual(accepted, {"group-1"})
+
+    @patch("household_validation.services.parse_validation_workbook")
+    def test_upload_counts_only_actual_participant_changes(self, parse_workbook_mock):
+        rows = [
+            self._uploaded_row(2, "member-1", True),
+            self._uploaded_row(3, "member-2", False),
+            self._uploaded_row(4, "member-3", None),
+        ]
+        parse_workbook_mock.return_value = SimpleNamespace(
+            rows=rows,
+            rows_read=3,
+            errors=[],
+        )
+        batch = MagicMock(id="batch-1")
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_primary_worker_rejections", return_value={}),
+            patch.object(service, "_get_or_create_batch", return_value=batch),
+            patch.object(
+                service,
+                "_apply_row",
+                side_effect=[([], False), ([], True), ([], False)],
+            ),
+            patch(
+                "household_validation.services.transaction.atomic",
+                return_value=nullcontext(),
+            ),
+        ):
+            result = service.upload(b"workbook")
+
+        self.assertEqual(result["participant_updates"], 1)
+        self.assertEqual(result["households_verified"], 1)
+        self.assertEqual(result["households_not_verified"], 0)
 
     @patch("household_validation.services.Group.objects.filter")
     def test_group_lookup_prefetches_members_and_individuals(self, filter_mock):
@@ -2089,7 +2519,7 @@ class UploadHardeningTest(TestCase):
 
         self.assertIn("Row 2: form_number does not match the household member", errors)
         self.assertIn("Row 2: member_name does not match the household member", errors)
-        self.assertIn("Row 2: national_id does not match the household member", errors)
+        self.assertNotIn("Row 2: national_id does not match the household member", errors)
         self.assertIn("Row 2: member_gender does not match the household member", errors)
         self.assertIn("Row 2: fit_for_work does not match the household member", errors)
         self.assertIn("Row 2: relationship does not match the household member", errors)

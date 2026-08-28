@@ -29,6 +29,7 @@ class HouseholdValidationBatchGQLType(graphene.ObjectType):
 class HouseholdValidationBatchRowGQLType(graphene.ObjectType):
     id = graphene.UUID()
     batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
     group_id = graphene.UUID()
     group_individual_id = graphene.UUID()
     individual_id = graphene.UUID()
@@ -96,6 +97,8 @@ class HouseholdValidationBatchesGQLType(graphene.ObjectType):
 class HouseholdValidationBatchRowsGQLType(graphene.ObjectType):
     rows = graphene.List(HouseholdValidationBatchRowGQLType)
     count = graphene.Int()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
 
 
 class HouseholdValidationErrorReportGQLType(graphene.ObjectType):
