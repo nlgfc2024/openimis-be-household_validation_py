@@ -52,6 +52,8 @@ class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
 
 
 class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
     rows_read = graphene.Int()
     households_verified = graphene.Int()
     households_not_verified = graphene.Int()

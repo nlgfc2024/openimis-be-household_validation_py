@@ -45,10 +45,8 @@ EXCEL_COLUMNS = [
     "marital_status",
     "disability",
     "fit_for_work",
-    "head",
     "pmt_score",
     "household_wealth_quintile",
-    "validation_date",
     "project",
     "project_id",
     "validation_notes",
@@ -58,9 +56,9 @@ PROJECT_OPTIONS_SHEET = "Project Options"
 PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
 
 EDITABLE_COLUMNS = {
+    "national_id",
     "primary_worker",
     "verified",
-    "validation_date",
     "project",
     "validation_notes",
 }
@@ -69,6 +67,98 @@ TEXT_COLUMNS = {
     "form_number",
     "national_id",
 }
+
+PRIMARY_WORKER_REJECTION_CODE = "MULTIPLE_PRIMARY_WORKERS"
+PRIMARY_WORKER_REJECTION_MESSAGE = (
+    "household has more than one primary worker"
+)
+LEGACY_PRIMARY_WORKER_REJECTION_MESSAGE = (
+    "Rejected: household would have more than one primary worker"
+)
+
+
+def is_primary_worker_rejection(row):
+    json_ext = row.json_ext or {}
+    return (
+        json_ext.get("error_code") == PRIMARY_WORKER_REJECTION_CODE
+        or row.error_message
+        in {
+            PRIMARY_WORKER_REJECTION_MESSAGE,
+            LEGACY_PRIMARY_WORKER_REJECTION_MESSAGE,
+        }
+    )
+
+
+def build_rejected_households_workbook_bytes(rows):
+    rejected_rows = [row for row in rows if is_primary_worker_rejection(row)]
+    households = {}
+    for row in rejected_rows:
+        raw_row = row.raw_row or {}
+        group_uuid = str(
+            getattr(row, "group_id", None)
+            or raw_row.get("group_uuid")
+            or f"row-{row.row_number}"
+        )
+        household = households.setdefault(
+            group_uuid,
+            {
+                "form_number": (
+                    raw_row.get("form_number")
+                    or raw_row.get("group_code")
+                    or group_uuid
+                ),
+                "group_uuid": group_uuid,
+                "row_numbers": set(),
+                "rejection_reason": row.error_message,
+            },
+        )
+        if row.row_number is not None:
+            household["row_numbers"].add(row.row_number)
+
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Rejected Households"
+    headers = [
+        "form_number",
+        "group_uuid",
+        "workbook_rows",
+        "rejection_reason",
+    ]
+    worksheet.append(headers)
+
+    for household in households.values():
+        values = [
+            household["form_number"],
+            household["group_uuid"],
+            ", ".join(
+                str(row_number)
+                for row_number in sorted(household["row_numbers"])
+            ),
+            household["rejection_reason"],
+        ]
+        worksheet.append(values)
+        for cell in worksheet[worksheet.max_row]:
+            if isinstance(cell.value, str):
+                cell.data_type = "s"
+
+    for cell in worksheet[1]:
+        cell.font = Font(bold=True)
+        cell.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+    worksheet.freeze_panes = "A2"
+    worksheet.auto_filter.ref = worksheet.dimensions
+    for column_index, column_cells in enumerate(worksheet.columns, start=1):
+        max_length = max(
+            len(str(cell.value)) if cell.value is not None else 0
+            for cell in column_cells
+        )
+        worksheet.column_dimensions[get_column_letter(column_index)].width = min(
+            max(max_length + 2, 12),
+            50,
+        )
+
+    output = BytesIO()
+    workbook.save(output)
+    return output.getvalue(), len(households)
 
 
 class ExcelValidationListExporter:
@@ -169,12 +259,10 @@ class ExcelValidationListExporter:
             "disability": self._disability(individual),
             "fit_for_work": "YES" if member.fit_for_work else "NO",
             "relationship": self._relationship(member.role),
-            "head": "YES" if self._is_head(member) else "NO",
             "pmt_score": household.pmt_score,
             "household_wealth_quintile": household.wealth_quintile,
             "primary_worker": self._primary_worker(group_individual),
             "verified": None,
-            "validation_date": None,
             "project": None,
             "project_id": None,
             "validation_notes": None,
