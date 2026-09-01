@@ -72,9 +72,22 @@ PRIMARY_WORKER_REJECTION_CODE = "MULTIPLE_PRIMARY_WORKERS"
 PRIMARY_WORKER_REJECTION_MESSAGE = (
     "household has more than one primary worker"
 )
+PRIMARY_WORKER_VERIFIED_BLANK_CODE = "PRIMARY_WORKER_VERIFIED_BLANK"
+PRIMARY_WORKER_VERIFIED_BLANK_MESSAGE = (
+    "primary worker is YES and verified is blank"
+)
+PRIMARY_WORKER_NOT_VERIFIED_CODE = "PRIMARY_WORKER_NOT_VERIFIED"
+PRIMARY_WORKER_NOT_VERIFIED_MESSAGE = (
+    "primary worker is YES and verified is NO"
+)
 LEGACY_PRIMARY_WORKER_REJECTION_MESSAGE = (
     "Rejected: household would have more than one primary worker"
 )
+HOUSEHOLD_REJECTION_CODES = {
+    PRIMARY_WORKER_REJECTION_CODE,
+    PRIMARY_WORKER_VERIFIED_BLANK_CODE,
+    PRIMARY_WORKER_NOT_VERIFIED_CODE,
+}
 
 
 def is_primary_worker_rejection(row):
@@ -89,8 +102,15 @@ def is_primary_worker_rejection(row):
     )
 
 
+def is_household_rejection(row):
+    return (
+        (row.json_ext or {}).get("error_code") in HOUSEHOLD_REJECTION_CODES
+        or is_primary_worker_rejection(row)
+    )
+
+
 def build_rejected_households_workbook_bytes(rows):
-    rejected_rows = [row for row in rows if is_primary_worker_rejection(row)]
+    rejected_rows = [row for row in rows if is_household_rejection(row)]
     households = {}
     for row in rejected_rows:
         raw_row = row.raw_row or {}
@@ -116,8 +136,18 @@ def build_rejected_households_workbook_bytes(rows):
             household["row_numbers"].add(row.row_number)
 
     workbook = Workbook()
-    worksheet = workbook.active
-    worksheet.title = "Rejected Households"
+    summary_worksheet = workbook.active
+    summary_worksheet.title = "Summary"
+    summary_worksheet.append(["rejection_reason", "rejected_households"])
+    reason_counts = {}
+    for household in households.values():
+        reason = household["rejection_reason"]
+        reason_counts[reason] = reason_counts.get(reason, 0) + 1
+    for reason, household_count in reason_counts.items():
+        summary_worksheet.append([reason, household_count])
+    summary_worksheet.append(["Total rejected households", len(households)])
+
+    worksheet = workbook.create_sheet("Rejected Households")
     headers = [
         "form_number",
         "group_uuid",
@@ -141,20 +171,23 @@ def build_rejected_households_workbook_bytes(rows):
             if isinstance(cell.value, str):
                 cell.data_type = "s"
 
-    for cell in worksheet[1]:
-        cell.font = Font(bold=True)
-        cell.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
-    worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = worksheet.dimensions
-    for column_index, column_cells in enumerate(worksheet.columns, start=1):
-        max_length = max(
-            len(str(cell.value)) if cell.value is not None else 0
-            for cell in column_cells
-        )
-        worksheet.column_dimensions[get_column_letter(column_index)].width = min(
-            max(max_length + 2, 12),
-            50,
-        )
+    for report_worksheet in (summary_worksheet, worksheet):
+        for cell in report_worksheet[1]:
+            cell.font = Font(bold=True)
+            cell.fill = PatternFill(fill_type="solid", fgColor="D9EAF7")
+        report_worksheet.freeze_panes = "A2"
+        report_worksheet.auto_filter.ref = report_worksheet.dimensions
+        for column_index, column_cells in enumerate(
+            report_worksheet.columns,
+            start=1,
+        ):
+            max_length = max(
+                len(str(cell.value)) if cell.value is not None else 0
+                for cell in column_cells
+            )
+            report_worksheet.column_dimensions[
+                get_column_letter(column_index)
+            ].width = min(max(max_length + 2, 12), 50)
 
     output = BytesIO()
     workbook.save(output)

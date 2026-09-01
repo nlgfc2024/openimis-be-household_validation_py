@@ -14,7 +14,15 @@ from individual.services import GroupIndividualService, IndividualService
 from location.models import Hotspot, MicroCatchment
 from project_social_protection.models import Project
 
-from household_validation.excel import LOCATION_COLUMN_TYPES
+from household_validation.excel import (
+    LOCATION_COLUMN_TYPES,
+    PRIMARY_WORKER_NOT_VERIFIED_CODE,
+    PRIMARY_WORKER_NOT_VERIFIED_MESSAGE,
+    PRIMARY_WORKER_REJECTION_CODE,
+    PRIMARY_WORKER_REJECTION_MESSAGE,
+    PRIMARY_WORKER_VERIFIED_BLANK_CODE,
+    PRIMARY_WORKER_VERIFIED_BLANK_MESSAGE,
+)
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
@@ -69,23 +77,41 @@ class HouseholdValidationUploadService:
             "households_not_verified": 0,
             "participant_updates": 0,
             "households_with_multiple_primary_workers": 0,
+            "total_rejected_households": 0,
+            "rejected_households_breakdown": [],
             "errors": len(parsed.errors),
             "error_messages": list(parsed.errors),
         }
-        participant_update_group_keys = self._accepted_validation_group_keys(
-            parsed.rows
-        )
+        primary_worker_rows = self._primary_worker_validation_rows(parsed.rows)
+        participant_update_group_keys = {
+            group_key
+            for group_key, uploaded_row in primary_worker_rows.items()
+            if uploaded_row.verified is not None
+        }
         primary_worker_rejections = self._primary_worker_rejections(
             parsed.rows,
             eligible_group_keys=participant_update_group_keys,
         )
+        verification_rejections = self._primary_worker_verification_rejections(
+            parsed.rows,
+        )
+        # Verification-state rules take precedence when a household happens to
+        # violate both a verification rule and the projected worker-count rule.
+        household_rejections = {
+            **primary_worker_rejections,
+            **verification_rejections,
+        }
         totals["households_with_multiple_primary_workers"] = len(
             primary_worker_rejections
+        )
+        totals["total_rejected_households"] = len(household_rejections)
+        totals["rejected_households_breakdown"] = (
+            self._rejection_breakdown(household_rejections)
         )
         parsed_error_rows = set(getattr(parsed, "error_row_numbers", ()))
         rejected_rows = {
             row_number
-            for rejection in primary_worker_rejections.values()
+            for rejection in household_rejections.values()
             for row_number in rejection["row_numbers"]
         }
         totals["errors"] += len(rejected_rows - parsed_error_rows)
@@ -107,11 +133,12 @@ class HouseholdValidationUploadService:
         with transaction.atomic():
             for uploaded_row in parsed.rows:
                 group_key = self._uploaded_group_key(uploaded_row)
-                primary_worker_rejection = primary_worker_rejections.get(group_key)
-                if primary_worker_rejection:
-                    self._save_primary_worker_rejection(
+                household_rejection = household_rejections.get(group_key)
+                if household_rejection:
+                    self._save_household_rejection(
                         uploaded_row,
                         batch=batch,
+                        rejection=household_rejection,
                     )
                     continue
                 row_errors, participant_updated = self._apply_row(
@@ -120,15 +147,19 @@ class HouseholdValidationUploadService:
                     upload_date=upload_date,
                     uploaded_at=uploaded_at,
                     allow_participant_update=group_key in participant_update_group_keys,
+                    apply_household_validation=(
+                        primary_worker_rows.get(group_key) is uploaded_row
+                    ),
                 )
                 if row_errors:
                     totals["errors"] += len(row_errors)
                     totals["error_messages"].extend(row_errors)
                     continue
-                if uploaded_row.verified is True:
-                    verified_group_ids.add(group_key)
-                elif uploaded_row.verified is False:
-                    not_verified_group_ids.add(group_key)
+                if primary_worker_rows.get(group_key) is uploaded_row:
+                    if uploaded_row.verified is True:
+                        verified_group_ids.add(group_key)
+                    elif uploaded_row.verified is False:
+                        not_verified_group_ids.add(group_key)
                 if participant_updated:
                     totals["participant_updates"] += 1
 
@@ -141,14 +172,25 @@ class HouseholdValidationUploadService:
         return totals
 
     def _accepted_validation_group_keys(self, uploaded_rows):
-        accepted_group_keys = set()
+        return {
+            group_key
+            for group_key, uploaded_row in self._primary_worker_validation_rows(
+                uploaded_rows
+            ).items()
+            if uploaded_row.verified is not None
+        }
+
+    def _primary_worker_validation_rows(self, uploaded_rows):
+        primary_worker_rows = {}
         for uploaded_row in uploaded_rows:
-            if uploaded_row.verified is None:
+            if uploaded_row.primary_worker is not True:
                 continue
             errors, _, _, _ = self._resolve_row(uploaded_row)
             if not errors:
-                accepted_group_keys.add(self._uploaded_group_key(uploaded_row))
-        return accepted_group_keys
+                primary_worker_rows[
+                    self._uploaded_group_key(uploaded_row)
+                ] = uploaded_row
+        return primary_worker_rows
 
     def _primary_worker_rejections(
         self,
@@ -212,8 +254,69 @@ class HouseholdValidationUploadService:
                 "row_numbers": {
                     uploaded_row.row_number for uploaded_row in group_rows
                 },
+                "error_code": PRIMARY_WORKER_REJECTION_CODE,
+                "error_message": PRIMARY_WORKER_REJECTION_MESSAGE,
             }
         return rejections
+
+    def _primary_worker_verification_rejections(self, uploaded_rows):
+        rows_by_group = {}
+        for uploaded_row in uploaded_rows:
+            rows_by_group.setdefault(
+                self._uploaded_group_key(uploaded_row),
+                [],
+            ).append(uploaded_row)
+
+        rejections = {}
+        for group_key, group_rows in rows_by_group.items():
+            rejection = None
+            for uploaded_row in group_rows:
+                if uploaded_row.primary_worker is not True:
+                    continue
+                errors, _, _, _ = self._resolve_row(uploaded_row)
+                if errors:
+                    continue
+                if uploaded_row.verified is None:
+                    rejection = {
+                        "error_code": PRIMARY_WORKER_VERIFIED_BLANK_CODE,
+                        "error_message": PRIMARY_WORKER_VERIFIED_BLANK_MESSAGE,
+                    }
+                    break
+                if uploaded_row.verified is False and rejection is None:
+                    rejection = {
+                        "error_code": PRIMARY_WORKER_NOT_VERIFIED_CODE,
+                        "error_message": PRIMARY_WORKER_NOT_VERIFIED_MESSAGE,
+                    }
+
+            if rejection is not None:
+                rejection.update(
+                    {
+                        "row_count": len(group_rows),
+                        "row_numbers": {
+                            uploaded_row.row_number for uploaded_row in group_rows
+                        },
+                    }
+                )
+                rejections[group_key] = rejection
+        return rejections
+
+    @staticmethod
+    def _rejection_breakdown(rejections):
+        counts = {}
+        for rejection in rejections.values():
+            key = (
+                rejection["error_code"],
+                rejection["error_message"],
+            )
+            counts[key] = counts.get(key, 0) + 1
+        return [
+            {
+                "code": code,
+                "reason": reason,
+                "household_count": household_count,
+            }
+            for (code, reason), household_count in counts.items()
+        ]
 
     def _active_group_members(self, group):
         prefetched_members = getattr(
@@ -235,6 +338,16 @@ class HouseholdValidationUploadService:
         )
 
     def _save_primary_worker_rejection(self, uploaded_row, batch):
+        self._save_household_rejection(
+            uploaded_row,
+            batch=batch,
+            rejection={
+                "error_code": PRIMARY_WORKER_REJECTION_CODE,
+                "error_message": PRIMARY_WORKER_REJECTION_MESSAGE,
+            },
+        )
+
+    def _save_household_rejection(self, uploaded_row, batch, rejection):
         group = self._group(uploaded_row.values["group_uuid"])
         group_individual = self._group_individual(
             uploaded_row.values["member_uuid"],
@@ -247,8 +360,8 @@ class HouseholdValidationUploadService:
             group_individual=group_individual,
             project=self._project(uploaded_row.project_id),
             status=HouseholdValidationBatchRow.Status.ERROR,
-            error_message="household has more than one primary worker",
-            error_code="MULTIPLE_PRIMARY_WORKERS",
+            error_message=rejection["error_message"],
+            error_code=rejection["error_code"],
         )
 
     @staticmethod
@@ -317,6 +430,7 @@ class HouseholdValidationUploadService:
         upload_date,
         uploaded_at,
         allow_participant_update=False,
+        apply_household_validation=False,
     ):
         errors, group, group_individual, project = self._resolve_row(uploaded_row)
 
@@ -332,7 +446,7 @@ class HouseholdValidationUploadService:
             )
             return errors, False
 
-        if uploaded_row.verified is not None:
+        if apply_household_validation and uploaded_row.verified is not None:
             self._apply_group_validation(
                 group=group,
                 uploaded_row=uploaded_row,
@@ -376,7 +490,7 @@ class HouseholdValidationUploadService:
             status=(
                 HouseholdValidationBatchRow.Status.APPLIED
                 if (
-                    uploaded_row.verified is not None
+                    apply_household_validation
                     or participant_updated
                 )
                 else HouseholdValidationBatchRow.Status.SKIPPED
