@@ -51,6 +51,12 @@ class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
     generated_at = graphene.DateTime()
 
 
+class HouseholdValidationRejectionBreakdownGQLType(graphene.ObjectType):
+    code = graphene.String()
+    reason = graphene.String()
+    household_count = graphene.Int()
+
+
 class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     batch_id = graphene.UUID()
     upload_attempt_id = graphene.UUID()
@@ -59,6 +65,10 @@ class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     households_not_verified = graphene.Int()
     participant_updates = graphene.Int()
     households_with_multiple_primary_workers = graphene.Int()
+    total_rejected_households = graphene.Int()
+    rejected_households_breakdown = graphene.List(
+        HouseholdValidationRejectionBreakdownGQLType
+    )
     errors = graphene.Int()
     error_messages = graphene.List(graphene.String)
 
