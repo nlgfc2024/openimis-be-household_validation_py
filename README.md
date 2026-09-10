@@ -267,6 +267,9 @@ mutation UploadValidationList($fileBase64: String!) {
     uploadAttemptId
     rowsRead
     householdsVerified
+    participantsVerified
+    participantsNotVerified
+    participantsRejected
     householdsNotVerified
     participantUpdates
     errors
@@ -331,10 +334,20 @@ query {
 
 Expected upload behavior:
 
-- `verified = YES` stores `validation_status = VERIFIED` on `Group.Json_ext`.
-- `verified = NO` stores `validation_status = NOT_VERIFIED` on `Group.Json_ext`.
-- `primary_worker = YES/NO` stores the worker flag on `GroupIndividual.Json_ext` without changing `recipient_type`; unchanged values are skipped and are not included in `participantUpdates`.
-- Before applying any rows, upload projects the final primary-worker state of each household from the database plus the workbook values. A household that would have more than one primary worker is rejected in full; other households continue processing.
+- `rowsRead` counts every non-empty participant row encountered in the workbook, including rows that later fail validation.
+- The workbook has no separate `verified` column. Upload derives the household status from the projected primary-worker assignments: exactly one primary worker stores `validation_status = VERIFIED`; none stores `validation_status = NOT_VERIFIED`.
+- Generated workbooks always leave `primary_worker` blank; they neither expose the stored value nor suggest `YES` from `recipient_type`.
+- Participant rows are grouped visually by alternating green and light-green fills; every row belonging to the same household uses the same fill.
+- `participantsVerified` counts unique participants explicitly marked `primary_worker = YES` in successfully verified households; rejected households, invalid rows, blank/`NO` participants, and `NOT_VERIFIED` households are excluded.
+- `participantsNotVerified` counts unique, successfully processed participants in non-rejected households marked `NOT_VERIFIED`; rejected households and invalid rows are excluded.
+- `participantsRejected` counts the unique participants explicitly marked `primary_worker = YES` whose multiple selections caused a household rejection. Other members of the rejected household are excluded. These rejections are reported separately and do not increase `errors`.
+- Rejected rows use a dedicated `REJECTED` audit status and are excluded from system error reports.
+- With exactly one `primary_worker = YES`, upload atomically clears every existing Primary Worker assignment in the household before assigning the selected participant. This includes active household members not present in the workbook and does not change `recipient_type`.
+- With no `primary_worker = YES`, the household is marked not verified but its existing database Primary Worker assignment is preserved. With more than one `YES`, the household is rejected and no Primary Worker changes are made.
+- Primary Worker changes are not included in `participantUpdates`, which counts National ID changes only.
+- Before applying any rows, upload derives the household verification status solely from valid workbook rows. Stored Primary Worker flags do not turn blank cells into implicit selections.
+- A parser or structural error on any identifiable household row prevents updates for the entire household.
+- An unchanged re-upload preserves the existing `last_verified_date`; the date advances on the first validation or when status, Primary Worker, National ID, project, or validation notes change.
 - Project selection is stored as validation intent/prospect metadata only.
 - Upload does not create `GroupBeneficiaryProjectEnrollment` records.
 - Protected workbook fields such as household/member identifiers, location labels, member details, fit-for-work, and head are checked for tampering.

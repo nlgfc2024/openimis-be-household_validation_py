@@ -5,7 +5,10 @@ from django.core.exceptions import PermissionDenied
 
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
-from household_validation.excel import build_rejected_households_workbook_bytes
+from household_validation.excel import (
+    build_rejected_households_workbook_bytes,
+    is_primary_worker_rejection,
+)
 from household_validation.gql_mutations import (
     GenerateHouseholdValidationListMutation,
     UploadHouseholdValidationListMutation,
@@ -193,7 +196,7 @@ class Query(graphene.ObjectType):
             HouseholdValidationBatchRow.objects.filter(
                 batch_id=kwargs["batch_id"],
                 upload_attempt_id=kwargs["upload_attempt_id"],
-                status=HouseholdValidationBatchRow.Status.ERROR,
+                status=HouseholdValidationBatchRow.Status.REJECTED,
                 is_deleted=False,
             ).order_by("row_number")
         )
@@ -217,16 +220,20 @@ class Query(graphene.ObjectType):
             id=kwargs["batch_id"],
             is_deleted=False,
         )
-        error_rows = batch.rows.filter(
-            status=HouseholdValidationBatchRow.Status.ERROR,
-            is_deleted=False,
-        )
+        error_rows = [
+            row
+            for row in batch.rows.filter(
+                status=HouseholdValidationBatchRow.Status.ERROR,
+                is_deleted=False,
+            )
+            if not is_primary_worker_rejection(row)
+        ]
         report = build_validation_error_report(batch)
         return HouseholdValidationErrorReportGQLType(
             batch_id=batch.id,
             file_name=f"household_validation_errors_{batch.id}.csv",
             file_base64=base64.b64encode(report.encode("utf-8")).decode("ascii"),
-            error_count=error_rows.count(),
+            error_count=len(error_rows),
         )
 
     @staticmethod
