@@ -515,7 +515,7 @@ class ExcelValidationListExporter:
     def _has_business(self, individual):
         if not individual:
             return None
-        value = (getattr(individual, "json_ext", None) or {}).get("has_business")
+        value = (getattr(individual, "json_ext", None) or {}).get("business_experience")
         if isinstance(value, bool):
             return "Yes" if value else "No"
         if isinstance(value, str):
@@ -529,7 +529,7 @@ class ExcelValidationListExporter:
     def _business_type(self, individual):
         if not individual:
             return None
-        return (getattr(individual, "json_ext", None) or {}).get("business_type")
+        return (getattr(individual, "json_ext", None) or {}).get("type_of_business")
 
     def _business_period(self, individual):
         if not individual:
