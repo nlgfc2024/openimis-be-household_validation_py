@@ -2,6 +2,15 @@ from django.apps import AppConfig
 
 MODULE_NAME = "household_validation"
 
+DEFAULT_BUSINESS_TYPE_OPTIONS = [
+    "Crop farming",
+    "Livestock farming",
+    "Grocery shop",
+    "Tailoring",
+    "Transport services",
+    "Other businesses",
+]
+
 RIGHT_HOUSEHOLD_VALIDATION_QUERY_EXPORT = 958001
 RIGHT_HOUSEHOLD_VALIDATION_UPLOAD = 958002
 RIGHT_HOUSEHOLD_VALIDATION_HISTORY = 958003
@@ -72,6 +81,7 @@ DEFAULT_CONFIG = {
     "female_headed_percentage": 40,
     "youth_percentage": 40,
     "reserve_percentage": 20,
+    "business_type_options": DEFAULT_BUSINESS_TYPE_OPTIONS,
 }
 
 
@@ -89,6 +99,7 @@ class HouseholdValidationConfig(AppConfig):
     female_headed_percentage = None
     youth_percentage = None
     reserve_percentage = None
+    business_type_options = None
 
     @classmethod
     def _load_config(cls, cfg):

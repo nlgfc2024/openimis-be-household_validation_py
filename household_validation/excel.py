@@ -27,53 +27,6 @@ BUSINESS_TYPE_COLUMN = "Type of Business"
 BUSINESS_DURATION_COLUMN = "Business Period (in years)"
 
 BUSINESS_TYPE_OPTIONS_SHEET = "Business Type Options"
-BUSINESS_TYPE_OPTIONS = [
-    "Crop farming",
-    "Livestock farming",
-    "Poultry farming",
-    "Fish farming",
-    "Produce buying and selling",
-    "Agricultural input sales",
-    "Grain milling",
-    "Food processing",
-    "Grocery shop",
-    "General merchandise shop",
-    "Market vending",
-    "Hardware and building materials sales",
-    "Fuel and energy products sales",
-    "Mobile money services",
-    "Phone and ICT services",
-    "Transport services",
-    "Motorcycle taxi (Kabaza) services",
-    "Restaurants and food outlets",
-    "Bakery and confectionery",
-    "Butchery",
-    "Lodging and guest house services",
-    "Tailoring",
-    "Carpentry",
-    "Welding and metal fabrication",
-    "Brick making",
-    "Construction services",
-    "Plumbing services",
-    "Electrical services",
-    "Barber shop",
-    "Salon",
-    "Photography",
-    "Printing services",
-    "Equipment hire",
-    "Education and training services",
-    "Healthcare and pharmacy services",
-    "Water supply services",
-    "Solar and renewable energy services",
-    "Waste collection and recycling",
-    "Tourism and recreation services",
-    "Financial and cooperative services",
-    "Machinery hire",
-    "Handicrafts and artisan products",
-    "Forestry products (firewood, charcoal, timber)",
-    "Other businesses",
-]
-
 
 EXCEL_COLUMNS = [
     "batch_id",
@@ -217,12 +170,25 @@ def build_rejected_households_workbook_bytes(rows):
     workbook.save(output)
     return output.getvalue(), len(households)
 
+def _configured_business_type_options():
+    from household_validation.apps import (
+        DEFAULT_BUSINESS_TYPE_OPTIONS,
+        HouseholdValidationConfig,
+    )
+
+    value = getattr(HouseholdValidationConfig, "business_type_options", None)
+    if not isinstance(value, (list, tuple)):
+        return list(DEFAULT_BUSINESS_TYPE_OPTIONS)
+    options = [str(option).strip() for option in value if str(option).strip()]
+    return options or list(DEFAULT_BUSINESS_TYPE_OPTIONS)
+
 
 class ExcelValidationListExporter:
     def __init__(self, selection_result, batch_id, projects=None):
         self.selection_result = selection_result
         self.batch_id = batch_id
         self.projects = projects or []
+        self.business_type_options = _configured_business_type_options()
         self._micro_catchment_cache = {}
         self._hotspot_cache = {}
 
@@ -304,7 +270,7 @@ class ExcelValidationListExporter:
     def _write_business_type_options(self, workbook):
         worksheet = workbook.create_sheet(BUSINESS_TYPE_OPTIONS_SHEET)
         worksheet.cell(row=1, column=1, value="business_type")
-        for row_number, business_type in enumerate(BUSINESS_TYPE_OPTIONS, start=2):
+        for row_number, business_type in enumerate(self.business_type_options, start=2):
             worksheet.cell(row=row_number, column=1, value=business_type)
         worksheet.sheet_state = "hidden"
         return worksheet
@@ -391,7 +357,7 @@ class ExcelValidationListExporter:
         )
 
         business_type_options_range = (
-            f"'{BUSINESS_TYPE_OPTIONS_SHEET}'!$A$2:$A${len(BUSINESS_TYPE_OPTIONS) + 1}"
+            f"'{BUSINESS_TYPE_OPTIONS_SHEET}'!$A$2:$A${len(self.business_type_options) + 1}"
         )
         business_type_validation = DataValidation(
             type="list",
