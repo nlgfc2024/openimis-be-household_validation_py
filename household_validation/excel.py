@@ -345,9 +345,9 @@ class ExcelValidationListExporter:
             "primary_worker": None,
             "project": None,
             "project_id": None,
-            HAS_BUSINESS_COLUMN: None,
-            BUSINESS_TYPE_COLUMN: None,
-            BUSINESS_DURATION_COLUMN: None,
+            HAS_BUSINESS_COLUMN: self._has_business(individual),
+            BUSINESS_TYPE_COLUMN: self._business_type(individual),
+            BUSINESS_DURATION_COLUMN: self._business_period(individual),
             "validation_notes": None,
         }
 
@@ -545,6 +545,30 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("disability")
+
+    def _has_business(self, individual):
+        if not individual:
+            return None
+        value = (getattr(individual, "json_ext", None) or {}).get("has_business")
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, str):
+            normalized = value.strip().upper()
+            if normalized == "YES":
+                return "Yes"
+            if normalized == "NO":
+                return "No"
+        return None
+
+    def _business_type(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("business_type")
+
+    def _business_period(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("business_period")
 
     def _relationship(self, role):
         if role is None:
