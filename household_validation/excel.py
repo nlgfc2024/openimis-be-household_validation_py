@@ -9,6 +9,7 @@ from household_validation.identity import get_household_form_number
 
 
 PRIMARY_WORKER_FORMULA = '"YES,NO"'
+HAS_BUSINESS_FORMULA = '"Yes,No"'
 HOUSEHOLD_ROW_COLORS = ("FFA9D18E", "FFE2F0D9")
 
 LOCATION_COLUMN_TYPES = {
@@ -21,6 +22,11 @@ LOCATION_COLUMN_TYPES = {
 MICRO_CATCHMENT_COLUMN = "Micro-Catchment"
 HOTSPOT_COLUMN = "Hotspot"
 
+HAS_BUSINESS_COLUMN = "Does member has a business"
+BUSINESS_TYPE_COLUMN = "Type of Business"
+BUSINESS_DURATION_COLUMN = "Business Period (in years)"
+
+BUSINESS_TYPE_OPTIONS_SHEET = "Business Type Options"
 
 EXCEL_COLUMNS = [
     "batch_id",
@@ -48,6 +54,9 @@ EXCEL_COLUMNS = [
     "household_wealth_quintile",
     "project",
     "project_id",
+    HAS_BUSINESS_COLUMN,
+    BUSINESS_TYPE_COLUMN,
+    BUSINESS_DURATION_COLUMN,
     "validation_notes",
 ]
 
@@ -58,6 +67,9 @@ EDITABLE_COLUMNS = {
     "national_id",
     "primary_worker",
     "project",
+    HAS_BUSINESS_COLUMN,
+    BUSINESS_TYPE_COLUMN,
+    BUSINESS_DURATION_COLUMN,
     "validation_notes",
 }
 
@@ -158,12 +170,25 @@ def build_rejected_households_workbook_bytes(rows):
     workbook.save(output)
     return output.getvalue(), len(households)
 
+def _configured_business_type_options():
+    from household_validation.apps import (
+        DEFAULT_BUSINESS_TYPE_OPTIONS,
+        HouseholdValidationConfig,
+    )
+
+    value = getattr(HouseholdValidationConfig, "business_type_options", None)
+    if not isinstance(value, (list, tuple)):
+        return list(DEFAULT_BUSINESS_TYPE_OPTIONS)
+    options = [str(option).strip() for option in value if str(option).strip()]
+    return options or list(DEFAULT_BUSINESS_TYPE_OPTIONS)
+
 
 class ExcelValidationListExporter:
     def __init__(self, selection_result, batch_id, projects=None):
         self.selection_result = selection_result
         self.batch_id = batch_id
         self.projects = projects or []
+        self.business_type_options = _configured_business_type_options()
         self._micro_catchment_cache = {}
         self._hotspot_cache = {}
 
@@ -175,10 +200,12 @@ class ExcelValidationListExporter:
         self._write_header(worksheet)
         self._write_rows(worksheet)
         project_options_worksheet = self._write_project_options(workbook)
+        business_type_options_worksheet = self._write_business_type_options(workbook)
         self._apply_validation(worksheet)
         self._apply_protection(worksheet)
         self._autosize_columns(worksheet)
         self._autosize_columns(project_options_worksheet)
+        self._autosize_columns(business_type_options_worksheet)
 
         project_id_column = EXCEL_COLUMNS.index("project_id") + 1
         worksheet.column_dimensions[worksheet.cell(1, project_id_column).column_letter].hidden = True
@@ -240,6 +267,14 @@ class ExcelValidationListExporter:
         worksheet.sheet_state = "hidden"
         return worksheet
 
+    def _write_business_type_options(self, workbook):
+        worksheet = workbook.create_sheet(BUSINESS_TYPE_OPTIONS_SHEET)
+        worksheet.cell(row=1, column=1, value="business_type")
+        for row_number, business_type in enumerate(self.business_type_options, start=2):
+            worksheet.cell(row=row_number, column=1, value=business_type)
+        worksheet.sheet_state = "hidden"
+        return worksheet
+
     def _build_row(self, selected_member):
         household = selected_member.household
         member = selected_member.member
@@ -276,6 +311,9 @@ class ExcelValidationListExporter:
             "primary_worker": None,
             "project": None,
             "project_id": None,
+            HAS_BUSINESS_COLUMN: self._has_business(individual),
+            BUSINESS_TYPE_COLUMN: self._business_type(individual),
+            BUSINESS_DURATION_COLUMN: self._business_period(individual),
             "validation_notes": None,
         }
 
@@ -283,6 +321,9 @@ class ExcelValidationListExporter:
         max_row = max(worksheet.max_row, 2)
         primary_worker_col = self._column_letter("primary_worker")
         project_col = self._column_letter("project")
+        has_business_col = self._column_letter(HAS_BUSINESS_COLUMN)
+        business_type_col = self._column_letter(BUSINESS_TYPE_COLUMN)
+        business_duration_col = self._column_letter(BUSINESS_DURATION_COLUMN)
 
         primary_worker_validation = DataValidation(
             type="list",
@@ -304,6 +345,53 @@ class ExcelValidationListExporter:
             )
             worksheet.add_data_validation(project_validation)
             project_validation.add(f"{project_col}2:{project_col}{max_row}")
+
+        has_business_validation = DataValidation(
+            type="list",
+            formula1=HAS_BUSINESS_FORMULA,
+            allow_blank=True,
+        )
+        worksheet.add_data_validation(has_business_validation)
+        has_business_validation.add(
+            f"{has_business_col}2:{has_business_col}{max_row}"
+        )
+
+        business_type_options_range = (
+            f"'{BUSINESS_TYPE_OPTIONS_SHEET}'!$A$2:$A${len(self.business_type_options) + 1}"
+        )
+        business_type_validation = DataValidation(
+            type="list",
+            formula1=f'IF(${has_business_col}2="Yes",{business_type_options_range},"")',
+            allow_blank=True,
+        )
+        business_type_validation.error = (
+            'Select "Yes" for "Does member has a business" before choosing a business type.'
+        )
+        business_type_validation.errorTitle = "Business type not applicable"
+        business_type_validation.showErrorMessage = True
+        worksheet.add_data_validation(business_type_validation)
+        business_type_validation.add(
+            f"{business_type_col}2:{business_type_col}{max_row}"
+        )
+
+        business_duration_validation = DataValidation(
+            type="custom",
+            formula1=(
+                f'AND(ISNUMBER(${business_duration_col}2),'
+                f'${business_duration_col}2>=0,'
+                f'${business_duration_col}2<=100)'
+            ),
+            allow_blank=True,
+        )
+        business_duration_validation.error = (
+            'Business period must be between 0 and 100'
+        )
+        business_duration_validation.errorTitle = "Invalid business period"
+        business_duration_validation.showErrorMessage = True
+        worksheet.add_data_validation(business_duration_validation)
+        business_duration_validation.add(
+            f"{business_duration_col}2:{business_duration_col}{max_row}"
+        )
 
     def _apply_protection(self, worksheet):
         worksheet.protection.sheet = True
@@ -423,6 +511,30 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("disability")
+
+    def _has_business(self, individual):
+        if not individual:
+            return None
+        value = (getattr(individual, "json_ext", None) or {}).get("business_experience")
+        if isinstance(value, bool):
+            return "Yes" if value else "No"
+        if isinstance(value, str):
+            normalized = value.strip().upper()
+            if normalized == "YES":
+                return "Yes"
+            if normalized == "NO":
+                return "No"
+        return None
+
+    def _business_type(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("type_of_business")
+
+    def _business_period(self, individual):
+        if not individual:
+            return None
+        return (getattr(individual, "json_ext", None) or {}).get("business_period")
 
     def _relationship(self, role):
         if role is None:
