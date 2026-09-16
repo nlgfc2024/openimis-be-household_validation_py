@@ -23,7 +23,6 @@ VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 EDITABLE_UPLOAD_COLUMNS = {
     "national_id",
     "primary_worker",
-    "verified",
     "project",
     "validation_notes",
 }
@@ -62,11 +61,17 @@ class WorkbookParseResult:
     rows: list[UploadedValidationRow] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     error_row_numbers: frozenset[int] = field(default_factory=frozenset)
+    invalid_group_keys: frozenset[str] = field(default_factory=frozenset)
     project_options: dict = field(default_factory=dict)
+    total_rows_read: int | None = None
 
     @property
     def rows_read(self):
-        return len(self.rows)
+        return (
+            len(self.rows)
+            if self.total_rows_read is None
+            else self.total_rows_read
+        )
 
 
 def parse_validation_workbook(file_or_bytes):
@@ -88,6 +93,8 @@ def parse_validation_workbook(file_or_bytes):
     project_options = _read_project_options(workbook)
     rows = []
     error_row_numbers = set()
+    invalid_group_keys = set()
+    total_rows_read = 0
     for row_number in range(2, worksheet.max_row + 1):
         values = {
             column: (
@@ -101,8 +108,8 @@ def parse_validation_workbook(file_or_bytes):
         }
         if _is_blank_row(values):
             continue
+        total_rows_read += 1
         row_errors = _validate_structural_values(row_number, values)
-        verified = _parse_yes_no(values.get("verified"))
         primary_worker = _parse_yes_no(values.get("primary_worker"))
         validation_date = _parse_date(values.get("validation_date"))
         project_label = _clean(values.get("project"))
@@ -114,8 +121,6 @@ def parse_validation_workbook(file_or_bytes):
         )
         if values.get("project_id") and not project_label:
             row_errors.append(f"Row {row_number}: project_id cannot be set without project")
-        if values.get("verified") not in (None, "") and verified is None:
-            row_errors.append(f"Row {row_number}: verified must be YES or NO")
         if values.get("primary_worker") not in (None, "") and _parse_yes_no(
             values.get("primary_worker")
         ) is None:
@@ -127,12 +132,17 @@ def parse_validation_workbook(file_or_bytes):
         if row_errors:
             errors.extend(row_errors)
             error_row_numbers.add(row_number)
+            group_key = str(values.get("group_uuid") or "").strip()
+            if group_key:
+                invalid_group_keys.add(group_key)
             continue
         rows.append(
             UploadedValidationRow(
                 row_number=row_number,
                 values=values,
-                verified=verified,
+                # Verification is derived for the whole household by the upload
+                # service after projecting all Primary Worker values.
+                verified=None,
                 primary_worker=primary_worker,
                 validation_date=validation_date,
                 project_name=project_name,
@@ -144,7 +154,9 @@ def parse_validation_workbook(file_or_bytes):
         rows=rows,
         errors=errors,
         error_row_numbers=frozenset(error_row_numbers),
+        invalid_group_keys=frozenset(invalid_group_keys),
         project_options=project_options,
+        total_rows_read=total_rows_read,
     )
 
 

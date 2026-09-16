@@ -63,6 +63,7 @@ class HouseholdValidationBatchRow(HistoryModel):
         PENDING = "PENDING", _("Pending")
         APPLIED = "APPLIED", _("Applied")
         SKIPPED = "SKIPPED", _("Skipped")
+        REJECTED = "REJECTED", _("Rejected")
         ERROR = "ERROR", _("Error")
 
     batch = models.ForeignKey(

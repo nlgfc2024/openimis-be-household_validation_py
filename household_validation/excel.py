@@ -8,8 +8,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from household_validation.identity import get_household_form_number
 
 
-YES_NO_FORMULA = '"YES,NO"'
 PRIMARY_WORKER_FORMULA = '"YES,NO"'
+HOUSEHOLD_ROW_COLORS = ("FFA9D18E", "FFE2F0D9")
 
 LOCATION_COLUMN_TYPES = {
     "District": "R",
@@ -39,7 +39,6 @@ EXCEL_COLUMNS = [
     "member_dob",
     "national_id",
     "primary_worker",
-    "verified",
     "member_gender",
     "member_age",
     "marital_status",
@@ -58,7 +57,6 @@ PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
 EDITABLE_COLUMNS = {
     "national_id",
     "primary_worker",
-    "verified",
     "project",
     "validation_notes",
 }
@@ -203,7 +201,18 @@ class ExcelValidationListExporter:
         worksheet.auto_filter.ref = worksheet.dimensions
 
     def _write_rows(self, worksheet):
+        household_fills = {}
         for row_number, selected_member in enumerate(self.selection_result.member_rows, start=2):
+            household_key = str(selected_member.household.id)
+            if household_key not in household_fills:
+                color = HOUSEHOLD_ROW_COLORS[
+                    len(household_fills) % len(HOUSEHOLD_ROW_COLORS)
+                ]
+                household_fills[household_key] = PatternFill(
+                    fill_type="solid",
+                    fgColor=color,
+                )
+            household_fill = household_fills[household_key]
             values = self._build_row(selected_member)
             for column_number, title in enumerate(EXCEL_COLUMNS, start=1):
                 value = values.get(title)
@@ -216,6 +225,7 @@ class ExcelValidationListExporter:
                 )
                 if title in TEXT_COLUMNS:
                     cell.number_format = "@"
+                cell.fill = household_fill
                 cell.protection = Protection(locked=title not in EDITABLE_COLUMNS)
 
     def _write_project_options(self, workbook):
@@ -261,8 +271,9 @@ class ExcelValidationListExporter:
             "relationship": self._relationship(member.role),
             "pmt_score": household.pmt_score,
             "household_wealth_quintile": household.wealth_quintile,
-            "primary_worker": self._primary_worker(group_individual),
-            "verified": None,
+            # Primary Worker is an upload input. Do not expose or suggest the
+            # currently stored assignment in a newly generated workbook.
+            "primary_worker": None,
             "project": None,
             "project_id": None,
             "validation_notes": None,
@@ -271,7 +282,6 @@ class ExcelValidationListExporter:
     def _apply_validation(self, worksheet):
         max_row = max(worksheet.max_row, 2)
         primary_worker_col = self._column_letter("primary_worker")
-        verified_col = self._column_letter("verified")
         project_col = self._column_letter("project")
 
         primary_worker_validation = DataValidation(
@@ -279,18 +289,10 @@ class ExcelValidationListExporter:
             formula1=PRIMARY_WORKER_FORMULA,
             allow_blank=True,
         )
-        verified_validation = DataValidation(
-            type="list",
-            formula1=YES_NO_FORMULA,
-            allow_blank=True,
-        )
-
         worksheet.add_data_validation(primary_worker_validation)
-        worksheet.add_data_validation(verified_validation)
         primary_worker_validation.add(
             f"{primary_worker_col}2:{primary_worker_col}{max_row}"
         )
-        verified_validation.add(f"{verified_col}2:{verified_col}{max_row}")
 
         project_count = len([project for project in self.projects if self._project_name(project)])
         if project_count:
@@ -421,19 +423,6 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("disability")
-
-    def _primary_worker(self, group_individual):
-        primary_worker = (
-            getattr(group_individual, "json_ext", None) or {}
-        ).get("primary_worker")
-        if primary_worker is True:
-            return "YES"
-        if primary_worker is False:
-            return "NO"
-        recipient_type = str(getattr(group_individual, "recipient_type", "") or "").upper()
-        if recipient_type == "PRIMARY":
-            return "YES"
-        return None
 
     def _relationship(self, role):
         if role is None:
