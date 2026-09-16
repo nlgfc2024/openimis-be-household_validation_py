@@ -411,7 +411,7 @@ class ExcelValidationListExporter:
         business_duration_validation = DataValidation(
             type="custom",
             formula1=(
-                f'ISNUMBER(${business_duration_col}2),'
+                f'AND(ISNUMBER(${business_duration_col}2),'
                 f'${business_duration_col}2>=0,'
                 f'${business_duration_col}2<=100)'
             ),
