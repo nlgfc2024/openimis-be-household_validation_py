@@ -492,6 +492,8 @@ Implemented and verified against the real test suite:
 - `select_households` is a single function driven by whether the resolved rule's `selection_strategy` key is present: a dict (PWP's wealth/demographic-quota allocation, percentages read from that dict) or absent (program-based — no wealth/PMT computation, ordered by `priority_flag`, capped at `targetCount` with no reserve list).
 - PWP's female-headed/youth/reserve percentages moved from flat `female_headed_percentage`/`youth_headed_percentage`/`reserve_percentage` `ModuleConfiguration` keys into `program_eligibility_rules["PWP"]["selection_strategy"]`; `household_validation/tests.py` was updated to pass a `rule={"selection_strategy": {...}}` argument to `select_households` in place of the old `patch.object(HouseholdValidationConfig, "...")` calls.
 - Dedicated coverage for the pieces a config/algorithm refactor like this can silently break: `EligibleMember.is_eligible` (`EligibleMemberIsEligibleTest`), `EligibleHouseholdSelectionService._resolve_eligibility_rule` including its case-insensitive matching and PWP fallback (`ResolveEligibilityRuleTest`), and the full `generate()` path end-to-end for no-`benefitPlanCode`/`RMEP`/`UPG` (`ProgramBasedGenerationIntegrationTest`). That last class is what actually exercises "an existing PWP deployment that never sends `benefitPlanCode` keeps running the same quota/reserve algorithm as before" — the isolated `select_households` unit tests above all pass an explicit `rule=`, so none of them alone proved that end-to-end default path still works.
+- A deployment whose saved `ModuleConfiguration` still sets the retired flat `female_headed_percentage`/`youth_percentage`/`reserve_percentage` keys (now under `program_eligibility_rules["PWP"]["selection_strategy"]`) gets a startup `logger.warning` naming exactly which stale keys it found, rather than the override silently doing nothing (`HouseholdValidationConfig._load_config`, `RETIRED_CONFIG_KEYS`).
+- `parse_validation_workbook` requires the business columns (`has_business`, `business_type`, `business_duration`) as upload headers when `business_columns_enabled` is on (`upload.py::_required_upload_columns`).
 
 Local verification commands (this module's package resolved from a checkout via `PYTHONPATH`, since the project venv otherwise has `household_validation` installed as a separate site-packages copy):
 
@@ -508,9 +510,9 @@ PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" ../.venv/bin/python manage.py t
 Latest local result:
 
 ```text
-Found 155 test(s).
-Ran 155 tests in 2.0s
-FAILED (errors=1)
+Found 158 test(s).
+Ran 158 tests in 0.8s
+All 158 tests pass
+OK
 ```
 
-154 of 155 tests pass. The one remaining failure, `ValidationUploadParserTest.test_parse_validation_workbook_rejects_previous_schema`, is unrelated to any of this — a gap in `upload.py`'s workbook schema validation, not an import problem. Neither issue predates or is touched by the `program_eligibility_rules`/`select_households` work in this document.

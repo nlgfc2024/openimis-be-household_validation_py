@@ -82,6 +82,7 @@ from household_validation.services import (
 )
 from household_validation.schema import Query
 from household_validation.upload import (
+    BUSINESS_UPLOAD_COLUMNS,
     OPTIONAL_UPLOAD_COLUMNS,
     PROJECT_SELECTION_TYPE_INTENT,
     VALIDATION_STATUS_NOT_VERIFIED,
@@ -1770,6 +1771,7 @@ class ValidationUploadParserTest(TestCase):
         self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
         self.assertIn("member_uuid", parsed.errors[0])
 
+    @patch.object(HouseholdValidationConfig, "business_columns_enabled", True)
     def test_parse_validation_workbook_rejects_previous_schema(self):
         workbook = self._upload_workbook()
         worksheet = workbook[VALIDATION_LIST_SHEET]
@@ -1790,6 +1792,8 @@ class ValidationUploadParserTest(TestCase):
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
         self.assertTrue(parsed.errors[0].startswith("Missing required columns:"))
+        for column in BUSINESS_UPLOAD_COLUMNS:
+            self.assertIn(column, parsed.errors[0])
 
     def test_parse_validation_workbook_preserves_primary_worker_no_and_blank(self):
         workbook = self._upload_workbook()
