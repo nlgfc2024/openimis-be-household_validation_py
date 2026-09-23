@@ -53,6 +53,15 @@ REQUIRED_UPLOAD_COLUMNS = tuple(
 STRUCTURAL_UPLOAD_COLUMNS = tuple(
     column for column in EXCEL_COLUMNS if column not in EDITABLE_UPLOAD_COLUMNS
 )
+BUSINESS_UPLOAD_COLUMNS = {HAS_BUSINESS_COLUMN, BUSINESS_TYPE_COLUMN, BUSINESS_DURATION_COLUMN}
+
+
+def _required_upload_columns(business_columns_enabled):
+    if not business_columns_enabled:
+        return REQUIRED_UPLOAD_COLUMNS
+    required = set(REQUIRED_UPLOAD_COLUMNS) | BUSINESS_UPLOAD_COLUMNS
+    return tuple(column for column in EXCEL_COLUMNS if column in required)
+
 
 YES_VALUES = {"YES", "Y", "TRUE", "1"}
 NO_VALUES = {"NO", "N", "FALSE", "0"}
@@ -106,7 +115,7 @@ def parse_validation_workbook(file_or_bytes):
     except ValueError as exc:
         return WorkbookParseResult(errors=[str(exc)])
     missing_columns = [
-        column for column in REQUIRED_UPLOAD_COLUMNS if column not in headers
+        column for column in _required_upload_columns(business_columns_enabled) if column not in headers
     ]
     if missing_columns:
         return WorkbookParseResult(

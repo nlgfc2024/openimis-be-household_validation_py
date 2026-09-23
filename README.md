@@ -418,7 +418,7 @@ Implemented and verified in the integration extension:
 - Hotspot and micro-catchment filters (`hotspotId`/`hotspotCode`, `catchmentId`/`catchmentCode`) scope selection to a `location.Hotspot`'s villages or a `location.MicroCatchment`'s TAs/GVHs.
 - Upload and export behavior still do not create enrollment records.
 
-Local verification commands:
+Local verification commands (this module's package resolved from a checkout via `PYTHONPATH`, since the project venv otherwise has `household_validation` installed as a separate site-packages copy):
 
 ```bash
 python3 -m compileall -q openimis-be-household_validation_py/household_validation
@@ -426,15 +426,15 @@ python3 -m compileall -q openimis-be-household_validation_py/household_validatio
 
 ```bash
 cd openimis-be_py/openIMIS
-../.venv/bin/python manage.py test household_validation
+PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" ../.venv/bin/python manage.py test household_validation --keepdb
 ```
 
 Latest local result:
 
 ```text
-Found 78 test(s).
-Ran 78 tests.
+Found 137 test(s).
+Ran 137 tests in 0.8s
 OK
 ```
 
-The local openIMIS test runner logs database/configuration warnings while module configuration falls back to defaults, but the household validation test suite passes.
+All 137 tests pass
