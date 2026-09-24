@@ -14,7 +14,7 @@ from individual.services import GroupIndividualService, IndividualService
 from location.models import Hotspot, MicroCatchment
 from project_social_protection.models import Project
 
-from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig
+from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig, apply_column_option_overrides
 from household_validation.excel import (
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
@@ -894,6 +894,7 @@ class EligibleHouseholdSelectionService:
         self.user = user
         self._project_name_cache = {}
         self._eligibility_rule = None
+        self._export_columns = None
 
     @property
     def eligibility_rule(self):
@@ -902,6 +903,13 @@ class EligibleHouseholdSelectionService:
         ``benefit_plan_code`` was given). ``None`` before any of those have
         run."""
         return self._eligibility_rule
+
+    @property
+    def export_columns(self):
+        """The extra Excel columns resolved by the most recent
+        select/candidates/generate call. ``None`` before any of those have
+        run."""
+        return self._export_columns
 
     def select(
         self,
@@ -976,6 +984,7 @@ class EligibleHouseholdSelectionService:
         benefit_plan_code=None,
     ):
         self._eligibility_rule = self._resolve_eligibility_rule(benefit_plan_code)
+        self._export_columns = self._resolve_export_columns(benefit_plan_code)
         queryset = self._base_queryset()
         queryset = self._apply_location_filters(
             queryset,
@@ -1008,6 +1017,7 @@ class EligibleHouseholdSelectionService:
         on the same response, so callers get a single request/response.
         """
         self._eligibility_rule = self._resolve_eligibility_rule(filters.get("benefit_plan_code"))
+        self._export_columns = self._resolve_export_columns(filters.get("benefit_plan_code"))
         base_queryset = self._base_queryset()
         catchment_id = filters.get("catchment_id")
         catchment_code = filters.get("catchment_code")
@@ -1332,6 +1342,25 @@ class EligibleHouseholdSelectionService:
                 f"No eligibility rule configured for benefit plan code '{benefit_plan_code}'"
             )
         return matched
+
+    def _resolve_export_columns(self, benefit_plan_code):
+        """Extra Excel export/upload columns for the given Program.
+        
+        Resolution follows the configured ``HouseholdValidationConfig.program_specific_export_columns`` mapping:
+            * If ``benefit_plan_code`` is provided, return the columns configured for that Program. Unknown Program codes resolve to ``[]``.
+            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"`` configuration as the default.
+        
+        Deployment overrides replace the entire ``program_specific_export_columns`` mapping rather than being deep-merged with the default configuration. 
+        Therefore, if an override omits the ``"PWP"`` key, this method falls back to the built-in default PWP columns instead of returning an empty list. 
+        This safeguards against silently generating incomplete Excel exports where all program-specific columns would otherwise be omitted.
+        """
+        columns = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
+        columns = {str(code).upper(): value for code, value in columns.items()}
+        if not benefit_plan_code:
+            resolved = columns.get("PWP") or DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]
+        else:
+            resolved = columns.get(str(benefit_plan_code).upper(), [])
+        return apply_column_option_overrides(resolved)
 
     def _build_household(self, group):
         groupindividuals = [

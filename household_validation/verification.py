@@ -6,6 +6,9 @@ PARTICIPANT_STATUS_COLUMN = "participant_status"
 HOUSEHOLD_STATUS_COLUMN = "household_status"
 BUSINESS_REJECTION_CODE = "BUSINESS_WITHOUT_PRIMARY_WORKER"
 
+YES_VALUES = ("YES", "Y", "TRUE", "1")
+NO_VALUES = ("NO", "N", "FALSE", "0")
+
 
 def resolve_participant_status(primary_worker):
     return VERIFIED if primary_worker is True else NOT_VERIFIED

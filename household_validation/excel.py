@@ -9,14 +9,12 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from household_validation.identity import get_household_form_number
 from household_validation.verification import (
-    PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, BUSINESS_REJECTION_CODE,
+    PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, BUSINESS_REJECTION_CODE, YES_VALUES,
 )
 
 
 PRIMARY_WORKER_ANSWERS_RANGE = "HouseholdPrimaryWorkerAnswers"
 PRIMARY_WORKER_NO_RANGE = "HouseholdPrimaryWorkerNo"
-BUSINESS_ANSWERS_RANGE = "HouseholdBusinessAnswers"
-BUSINESS_UNAVAILABLE_RANGE = "HouseholdBusinessUnavailable"
 HOUSEHOLD_ROW_COLORS = ("FFA9D18E", "FFE2F0D9")
 
 LOCATION_COLUMN_TYPES = {
@@ -29,15 +27,14 @@ LOCATION_COLUMN_TYPES = {
 MICRO_CATCHMENT_COLUMN = "Micro-Catchment"
 HOTSPOT_COLUMN = "Hotspot"
 
-HAS_BUSINESS_COLUMN = "Does member has a business"
-BUSINESS_TYPE_COLUMN = "Type of Business"
-BUSINESS_DURATION_COLUMN = "Business Period (in years)"
-BUSINESS_COLUMNS = {HAS_BUSINESS_COLUMN, BUSINESS_TYPE_COLUMN, BUSINESS_DURATION_COLUMN}
+# Extra, program-specific columns are inserted after this column.
+EXTRA_COLUMNS_INSERT_AFTER = "project_id"
 
-BUSINESS_TYPE_OPTIONS_SHEET = "Business Type Options"
+EXTRA_COLUMN_OPTIONS_SHEET = "Extra Column Options"
 
-# Full upload schema, including optional fields from previously issued workbooks.
-# Each exporter selects its output columns from this schema using deployment config.
+# Base/structural schema, always present regardless of which program's extra
+# columns are configured in. Each exporter inserts the resolved program's
+# extra columns after EXTRA_COLUMNS_INSERT_AFTER via `additional_columns`.
 EXCEL_COLUMNS = [
     "batch_id",
     "group_uuid",
@@ -64,9 +61,6 @@ EXCEL_COLUMNS = [
     "household_wealth_quintile",
     "project",
     "project_id",
-    HAS_BUSINESS_COLUMN,
-    BUSINESS_TYPE_COLUMN,
-    BUSINESS_DURATION_COLUMN,
     "validation_notes",
     PARTICIPANT_STATUS_COLUMN,
     HOUSEHOLD_STATUS_COLUMN,
@@ -79,9 +73,6 @@ EDITABLE_COLUMNS = {
     "national_id",
     "primary_worker",
     "project",
-    HAS_BUSINESS_COLUMN,
-    BUSINESS_TYPE_COLUMN,
-    BUSINESS_DURATION_COLUMN,
     "validation_notes",
 }
 
@@ -186,32 +177,25 @@ def build_rejected_households_workbook_bytes(rows):
     workbook.save(output)
     return output.getvalue(), len(households)
 
-def _configured_business_type_options():
-    from household_validation.apps import (
-        DEFAULT_BUSINESS_TYPE_OPTIONS,
-        HouseholdValidationConfig,
-    )
-
-    value = getattr(HouseholdValidationConfig, "business_type_options", None)
-    if not isinstance(value, (list, tuple)):
-        return list(DEFAULT_BUSINESS_TYPE_OPTIONS)
-    options = [str(option).strip() for option in value if str(option).strip()]
-    return options or list(DEFAULT_BUSINESS_TYPE_OPTIONS)
-
 
 class ExcelValidationListExporter:
-    def __init__(self, selection_result, batch_id, projects=None):
-        from household_validation.apps import HouseholdValidationConfig
-
+    def __init__(self, selection_result, batch_id, projects=None, additional_columns=None):
         self.selection_result = selection_result
         self.batch_id = batch_id
         self.projects = projects or []
-        self.business_columns_enabled = HouseholdValidationConfig.business_columns_enabled
-        self.columns = [
-            column for column in EXCEL_COLUMNS
-            if self.business_columns_enabled or column not in BUSINESS_COLUMNS
-        ]
-        self.business_type_options = _configured_business_type_options()
+        self.additional_columns = additional_columns or []
+        self._column_by_key = {col["key"]: col for col in self.additional_columns}
+        insert_at = EXCEL_COLUMNS.index(EXTRA_COLUMNS_INSERT_AFTER) + 1
+        self.columns = (
+            EXCEL_COLUMNS[:insert_at]
+            + [col["column_name"] for col in self.additional_columns]
+            + EXCEL_COLUMNS[insert_at:]
+        )
+        self._editable_columns = EDITABLE_COLUMNS | {
+            col["column_name"] for col in self.additional_columns
+        }
+        self._select_ranges = {}
+        self._extra_unavailable_range = None
         self._micro_catchment_cache = {}
         self._hotspot_cache = {}
 
@@ -226,12 +210,14 @@ class ExcelValidationListExporter:
         self._write_rows(worksheet)
         self._write_status_formulas(worksheet)
         project_options_worksheet = self._write_project_options(workbook)
-        if self.business_columns_enabled:
-            business_type_options_worksheet = self._write_business_type_options(workbook)
-            self._write_primary_worker_options(workbook, business_type_options_worksheet)
-            self._autosize_columns(business_type_options_worksheet)
+        extra_options_worksheet, primary_worker_col_index = self._write_extra_column_options(workbook)
+        if extra_options_worksheet is not None:
+            self._write_primary_worker_options(extra_options_worksheet, primary_worker_col_index)
+            self._autosize_columns(extra_options_worksheet)
         else:
-            self._write_primary_worker_options(workbook, project_options_worksheet)
+            # Historical position, kept so the workbook shape is stable when
+            # a program has no select-type extra columns to allocate a sheet for.
+            self._write_primary_worker_options(project_options_worksheet, 5)
         self._apply_validation(worksheet)
         self._apply_protection(worksheet)
         self._autosize_columns(worksheet)
@@ -288,7 +274,7 @@ class ExcelValidationListExporter:
                 if title in TEXT_COLUMNS:
                     cell.number_format = "@"
                 cell.fill = household_fill
-                cell.protection = Protection(locked=title not in EDITABLE_COLUMNS)
+                cell.protection = Protection(locked=title not in self._editable_columns)
 
     def _write_project_options(self, workbook):
         worksheet = workbook.create_sheet(PROJECT_OPTIONS_SHEET)
@@ -304,7 +290,6 @@ class ExcelValidationListExporter:
 
     def _write_status_formulas(self, worksheet):
         worker = self._column_letter("primary_worker")
-        business = self._column_letter(HAS_BUSINESS_COLUMN) if self.business_columns_enabled else None
         participant = self._column_letter(PARTICIPANT_STATUS_COLUMN)
         group = self._column_letter("group_uuid")
         last = worksheet.max_row
@@ -312,71 +297,69 @@ class ExcelValidationListExporter:
         workers = f'${worker}$2:${worker}${last}'
         statuses = f'${participant}$2:${participant}${last}'
         for row in range(2, last + 1):
-            # Use the same accepted boolean spellings as the upload parser.
-            def matches(column, options):
+            # Use the same accepted spellings as the upload parser (YES_VALUES).
+            def matches(column, options=YES_VALUES):
                 cell = f'UPPER(TRIM({column}{row}&""))'
                 return 'OR(' + ','.join(f'{cell}="{value}"' for value in options) + ')'
-            primary_yes = matches(worker, ("YES", "Y", "TRUE", "1"))
-            if self.business_columns_enabled:
-                business_yes = matches(business, ("YES", "Y", "TRUE", "1"))
-                business_no = matches(business, ("NO", "N", "FALSE", "0"))
-                business_type = self._column_letter(BUSINESS_TYPE_COLUMN)
-                period = self._column_letter(BUSINESS_DURATION_COLUMN)
-                valid_details = (
-                    f'AND(COUNTIF(\'{BUSINESS_TYPE_OPTIONS_SHEET}\'!$A$2:$A${len(self.business_type_options)+1},'
-                    f'{business_type}{row})>0,ISNUMBER({period}{row}),'
-                    f'{period}{row}>=0,{period}{row}<=100)'
-                )
-                participant_formula = (
-                    f'=IF(AND({primary_yes},OR({business_no},AND({business_yes},{valid_details}))),'
-                    f'"VERIFIED","NOT_VERIFIED")'
-                )
-            else:
-                participant_formula = f'=IF({primary_yes},"VERIFIED","NOT_VERIFIED")'
-            worksheet.cell(row, self.columns.index(PARTICIPANT_STATUS_COLUMN) + 1,
-                participant_formula)
+            primary_yes = matches(worker)
+            participant_formula = f'=IF({primary_yes},"VERIFIED","NOT_VERIFIED")'
+            worksheet.cell(
+                row, self.columns.index(PARTICIPANT_STATUS_COLUMN) + 1, participant_formula,
+            )
             worker_matches = '+'.join(
                 f'(UPPER(TRIM({workers}&""))="{value}")'
-                for value in ("YES", "Y", "TRUE", "1")
+                for value in YES_VALUES
             )
             worker_count = f'SUMPRODUCT(--({groups}=${group}{row}),--(({worker_matches})>0))'
-            worksheet.cell(row, self.columns.index(HOUSEHOLD_STATUS_COLUMN) + 1,
-                f'=IF(OR({worker_count}>1,COUNTIFS({groups},${group}{row},{statuses},'
-                f'"REJECTED")>0),"REJECTED",IF(COUNTIFS({groups},${group}{row},'
-                f'{statuses},"VERIFIED")>0,"VERIFIED","NOT_VERIFIED"))')
+            household_formula = (
+                f'=IF({worker_count}>1,"REJECTED",'
+                f'IF(COUNTIFS({groups},${group}{row},{statuses},"VERIFIED")>0,'
+                f'"VERIFIED","NOT_VERIFIED"))'
+            )
+            worksheet.cell(row, self.columns.index(HOUSEHOLD_STATUS_COLUMN) + 1, household_formula)
 
-    def _write_business_type_options(self, workbook):
-        worksheet = workbook.create_sheet(BUSINESS_TYPE_OPTIONS_SHEET)
-        worksheet.cell(row=1, column=1, value="business_type")
-        for row_number, business_type in enumerate(self.business_type_options, start=2):
-            worksheet.cell(row=row_number, column=1, value=business_type)
-        # Named ranges keep the dependent dropdown compatible with Excel and Calc.
-        worksheet["C1"] = "Business answers"
-        worksheet["C2"] = "Yes"
-        worksheet["C3"] = "No"
-        # Calc displays a genuinely empty list-source cell as numeric 0.
-        # An explicit empty string keeps the unavailable dropdown blank.
-        worksheet["C4"] = '=""'
-        for name, reference in (
-            (BUSINESS_ANSWERS_RANGE, "$C$2:$C$3"),
-            (BUSINESS_UNAVAILABLE_RANGE, "$C$4"),
-        ):
-            workbook.defined_names.add(DefinedName(
-                name, attr_text=f"'{BUSINESS_TYPE_OPTIONS_SHEET}'!{reference}",
-            ))
+    def _write_extra_column_options(self, workbook):
+        """Hidden sheet holding every select-type extra column's option list.
+
+        Returns ``(worksheet, next_free_column_index)`` -- the latter so the
+        caller can place the Primary Worker options past whatever columns
+        this used, or ``(None, None)`` when there are no select-type extra
+        columns to allocate a sheet for.
+        """
+        select_columns = [col for col in self.additional_columns if col.get("type") == "select"]
+        if not select_columns:
+            return None, None
+        worksheet = workbook.create_sheet(EXTRA_COLUMN_OPTIONS_SHEET)
+        for column_index, col in enumerate(select_columns, start=1):
+            letter = get_column_letter(column_index)
+            worksheet.cell(row=1, column=column_index, value=col["key"])
+            options = col.get("options") or []
+            for row_number, option in enumerate(options, start=2):
+                worksheet.cell(row=row_number, column=column_index, value=option)
+            self._select_ranges[col["key"]] = (
+                f"'{EXTRA_COLUMN_OPTIONS_SHEET}'!${letter}$2:${letter}${len(options) + 1}"
+            )
+        # A shared blank source for a gated dropdown whose dependency isn't met.
+        # Calc displays a genuinely empty list-source cell as numeric 0, so an
+        # explicit empty string keeps the unavailable dropdown blank.
+        unavailable_index = len(select_columns) + 1
+        unavailable_letter = get_column_letter(unavailable_index)
+        worksheet.cell(row=1, column=unavailable_index, value="unavailable")
+        worksheet.cell(row=2, column=unavailable_index, value='=""')
+        self._extra_unavailable_range = f"'{EXTRA_COLUMN_OPTIONS_SHEET}'!${unavailable_letter}$2"
         worksheet.sheet_state = "hidden"
-        return worksheet
+        return worksheet, unavailable_index + 1
 
-    def _write_primary_worker_options(self, workbook, worksheet):
-        # Primary Worker must still work when the business options sheet is absent.
-        worksheet["E1"] = "Primary Worker answers"
-        worksheet["E2"] = "YES"
-        worksheet["E3"] = "NO"
+    def _write_primary_worker_options(self, worksheet, column_index):
+        letter = get_column_letter(column_index)
+        worksheet[f"{letter}1"] = "Primary Worker answers"
+        worksheet[f"{letter}2"] = "YES"
+        worksheet[f"{letter}3"] = "NO"
         for name, reference in (
-            (PRIMARY_WORKER_ANSWERS_RANGE, "$E$2:$E$3"),
-            (PRIMARY_WORKER_NO_RANGE, "$E$3"),
+            (PRIMARY_WORKER_ANSWERS_RANGE, f"${letter}$2:${letter}$3"),
+            (PRIMARY_WORKER_NO_RANGE, f"${letter}$3"),
         ):
-            workbook.defined_names.add(DefinedName(
+            worksheet.parent.defined_names.add(DefinedName(
                 name, attr_text=f"'{worksheet.title}'!{reference}",
             ))
 
@@ -416,9 +399,6 @@ class ExcelValidationListExporter:
             "primary_worker": None,
             "project": None,
             "project_id": None,
-            HAS_BUSINESS_COLUMN: None,
-            BUSINESS_TYPE_COLUMN: None,
-            BUSINESS_DURATION_COLUMN: None,
             "validation_notes": None,
         }
 
@@ -479,121 +459,88 @@ class ExcelValidationListExporter:
             worksheet.add_data_validation(project_validation)
             project_validation.add(f"{project_col}2:{project_col}{max_row}")
 
-        if not self.business_columns_enabled:
-            return
+        for col in self.additional_columns:
+            self._apply_extra_column_validation(worksheet, col, max_row)
 
-        has_business_col = self._column_letter(HAS_BUSINESS_COLUMN)
-        business_type_col = self._column_letter(BUSINESS_TYPE_COLUMN)
-        business_duration_col = self._column_letter(BUSINESS_DURATION_COLUMN)
-        primary_worker_answered = (
-            f'OR(TRIM(${primary_worker_col}2&"")="YES",'
-            f'TRIM(${primary_worker_col}2&"")="Y",'
-            f'TRIM(${primary_worker_col}2&"")="TRUE",'
-            f'TRIM(${primary_worker_col}2&"")="1")'
-        )
-        has_business_validation = DataValidation(
-            type="list",
-            formula1=(
-                f'INDIRECT(IF({primary_worker_answered},'
-                f'"{BUSINESS_ANSWERS_RANGE}","{BUSINESS_UNAVAILABLE_RANGE}"))'
-            ),
-            # Ignore-blank must be off: otherwise an empty source can bypass
-            # the prerequisite when a value is typed directly into the cell.
-            allow_blank=False,
-            showDropDown=False,
-            showInputMessage=True,
-            promptTitle="Select Primary Worker first",
-            prompt=(
-                'First select YES in Primary Worker on this row. '
-                'Then choose Yes or No for Does member has a business. '
-                'If Yes, Business Period is required.'
-            ),
-            showErrorMessage=True,
-            errorStyle="stop",
-            errorTitle="Select Primary Worker first",
-            error=(
-                'Select YES in Primary Worker on this row first, '
-                'then choose Yes or No from the Business dropdown.'
-            ),
-        )
-        worksheet.add_data_validation(has_business_validation)
-        has_business_validation.add(
-            f"{has_business_col}2:{has_business_col}{max_row}"
+    def _dep_met_formula(self, depends_on):
+        dep_column = self._column_by_key[depends_on["key"]]["column_name"]
+        dep_letter = self._column_letter(dep_column)
+        equals = str(depends_on["equals"]).upper()
+        return f'UPPER(TRIM(${dep_letter}2&""))="{equals}"'
+
+    def _apply_extra_column_validation(self, worksheet, col, max_row):
+        column_letter = self._column_letter(col["column_name"])
+        target = f"{column_letter}2:{column_letter}{max_row}"
+        depends_on = col.get("depends_on")
+        dep_met = self._dep_met_formula(depends_on) if depends_on else None
+        required = bool(col.get("required"))
+        col_type = col.get("type")
+
+        dep_label = self._column_by_key[depends_on["key"]]["column_name"] if depends_on else None
+        prompt_title = f"Select {dep_label} first" if dep_met else None
+        prompt = (
+            f'Select "{depends_on["equals"]}" for {dep_label} on this row before entering '
+            f"{col['column_name']}."
+            if dep_met else None
         )
 
-        business_type_options_range = (
-            f"'{BUSINESS_TYPE_OPTIONS_SHEET}'!$A$2:$A${len(self.business_type_options) + 1}"
-        )
-        business_type_validation = DataValidation(
-            type="list",
-            formula1=f'IF(AND({primary_worker_answered},UPPER(TRIM(${has_business_col}2))="YES"),{business_type_options_range},{BUSINESS_UNAVAILABLE_RANGE})',
-            allow_blank=False,
-            errorStyle="stop",
-            showInputMessage=True,
-            promptTitle="Primary Worker YES required",
-            prompt="Select Primary Worker YES and Business Yes before entering business details.",
-        )
-        business_type_validation.error = (
-            'Select Primary Worker YES and Business Yes before choosing a business type.'
-        )
-        business_type_validation.errorTitle = "Business type not applicable"
-        business_type_validation.showErrorMessage = True
-        worksheet.add_data_validation(business_type_validation)
-        business_type_validation.add(
-            f"{business_type_col}2:{business_type_col}{max_row}"
-        )
+        validation = None
+        if col_type == "select":
+            options_range = self._select_ranges.get(col["key"], self._extra_unavailable_range)
+            if dep_met:
+                formula1 = f'INDIRECT(IF({dep_met},"{options_range}","{self._extra_unavailable_range}"))'
+            else:
+                formula1 = options_range
+            validation = DataValidation(
+                type="list",
+                formula1=formula1,
+                allow_blank=not required,
+                showDropDown=False,
+                showInputMessage=dep_met is not None,
+                promptTitle=prompt_title,
+                prompt=prompt,
+                showErrorMessage=True,
+                errorStyle="stop",
+                errorTitle=f"{col['column_name']} not applicable",
+                error=f"Select a valid option for {col['column_name']}.",
+            )
+        elif col_type == "number":
+            cell = f"${column_letter}2"
+            blank = f'LEN(TRIM({cell}&""))=0'
+            bounds = f'{cell}>={col.get("min", 0)}'
+            if col.get("max") is not None:
+                bounds += f',{cell}<={col["max"]}'
+            valid_number = f'AND(ISNUMBER({cell}),{bounds})'
+            if dep_met:
+                if required:
+                    formula = f'OR(AND(NOT({dep_met}),{blank}),AND({dep_met},{valid_number}))'
+                else:
+                    formula = f'OR(NOT({dep_met}),{blank},{valid_number})'
+            else:
+                formula = valid_number if required else f'OR({blank},{valid_number})'
+            validation = DataValidation(
+                type="custom",
+                formula1=formula,
+                allow_blank=not required,
+                showInputMessage=dep_met is not None,
+                promptTitle=prompt_title,
+                prompt=prompt,
+                showErrorMessage=True,
+                errorStyle="stop",
+                errorTitle=f"{col['column_name']} invalid",
+                error=f"Enter a valid number for {col['column_name']}.",
+            )
+        # type == "text": freeform, no DataValidation.
 
-        business_yes = (
-            f'AND({primary_worker_answered},OR(UPPER(TRIM(${has_business_col}2&""))="YES",'
-            f'UPPER(TRIM(${has_business_col}2&""))="Y",'
-            f'UPPER(TRIM(${has_business_col}2&""))="TRUE",'
-            f'UPPER(TRIM(${has_business_col}2&""))="1"))'
-        )
-        business_type_selected = (
-            f'LEN(TRIM(${business_type_col}2&""))>0'
-        )
-        period_blank = f'LEN(TRIM(${business_duration_col}2&""))=0'
-        business_duration_validation = DataValidation(
-            type="custom",
-            formula1=(
-                f'OR(AND(NOT({business_yes}),{period_blank}),'
-                f'AND({business_yes},NOT({business_type_selected}),{period_blank}),'
-                f'AND({business_yes},{business_type_selected},'
-                f'ISNUMBER(${business_duration_col}2),'
-                f'${business_duration_col}2>=0,${business_duration_col}2<=100))'
-            ),
-            allow_blank=False,
-            showInputMessage=True,
-            promptTitle="Select Business Type first",
-            prompt=(
-                'Select Primary Worker YES, Business Yes and a Type of Business. Enter the period '
-                'in years (0 to 100). Decimals such as 0.5 are allowed.'
-            ),
-            showErrorMessage=True,
-            errorStyle="stop",
-            errorTitle="Select Business Type first",
-            error=(
-                'Select Primary Worker YES, Business Yes and a Type of Business first.'
-            ),
-        )
-        worksheet.add_data_validation(business_duration_validation)
-        period_range = f"{business_duration_col}2:{business_duration_col}{max_row}"
-        business_duration_validation.add(period_range)
-        # Validation alone does not flag an untouched cell when Business changes.
-        worksheet.conditional_formatting.add(period_range, FormulaRule(
-            formula=[f'AND({business_yes},{business_type_selected},{period_blank})'],
-            fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
-            font=Font(color="FF9C0006"),
-        ))
-        for column, enabled in (
-            (has_business_col, primary_worker_answered),
-            (business_type_col, business_yes),
-            (business_duration_col, f'AND({business_yes},{business_type_selected})'),
-        ):
-            target = f"{column}2:{column}{max_row}"
-            # Highlight stale answers after changing the worker; never silently erase them.
+        if validation is not None:
+            worksheet.add_data_validation(validation)
+            validation.add(target)
+
+        if dep_met:
+            # Highlight stale answers after the dependency changes; never
+            # silently erase them.
             worksheet.conditional_formatting.add(target, FormulaRule(
-                formula=[f'AND(NOT({enabled}),LEN(TRIM(${column}2&""))>0)'],
+                formula=[f'AND(NOT({dep_met}),LEN(TRIM(${column_letter}2&""))>0)'],
                 fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
                 font=Font(color="FF9C0006"), stopIfTrue=True,
             ))
@@ -716,30 +663,6 @@ class ExcelValidationListExporter:
         if not individual:
             return None
         return (getattr(individual, "json_ext", None) or {}).get("disability")
-
-    def _has_business(self, individual):
-        if not individual:
-            return None
-        value = (getattr(individual, "json_ext", None) or {}).get("business_experience")
-        if isinstance(value, bool):
-            return "Yes" if value else "No"
-        if isinstance(value, str):
-            normalized = value.strip().upper()
-            if normalized == "YES":
-                return "Yes"
-            if normalized == "NO":
-                return "No"
-        return None
-
-    def _business_type(self, individual):
-        if not individual:
-            return None
-        return (getattr(individual, "json_ext", None) or {}).get("type_of_business")
-
-    def _business_period(self, individual):
-        if not individual:
-            return None
-        return (getattr(individual, "json_ext", None) or {}).get("business_period")
 
     def _relationship(self, role):
         if role is None:

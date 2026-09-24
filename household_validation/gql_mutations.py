@@ -181,6 +181,7 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             selection_result,
             batch_id=batch.id,
             projects=projects,
+            additional_columns=service.export_columns or [],
         ).export_bytes()
         file_name = f"household_validation_{batch.id}.xlsx"
         return HouseholdValidationGenerateResultGQLType(
