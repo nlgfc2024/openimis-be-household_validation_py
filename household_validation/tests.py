@@ -1978,10 +1978,12 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(
             self._value(worksheet, "participant_status"),
             '=IF(OR(UPPER(TRIM(P2&""))="YES",UPPER(TRIM(P2&""))="Y",'
-            'UPPER(TRIM(P2&""))="TRUE",UPPER(TRIM(P2&""))="1"),"VERIFIED","NOT_VERIFIED")',
+            'UPPER(TRIM(P2&""))="TRUE",UPPER(TRIM(P2&""))="1",'
+            'UPPER(TRIM(P2&""))="NO",UPPER(TRIM(P2&""))="N",'
+            'UPPER(TRIM(P2&""))="FALSE",UPPER(TRIM(P2&""))="0"),"VERIFIED","NOT_VERIFIED")',
         )
-        participant_col = self._cell(worksheet, "participant_status").column_letter
-        self.assertIn(f"${participant_col}$2:${participant_col}$3", self._value(worksheet, "household_status"))
+        worker_col = self._cell(worksheet, "primary_worker").column_letter
+        self.assertIn(f"${worker_col}$2:${worker_col}$3", self._value(worksheet, "household_status"))
 
         # Only the primary-worker and project dropdowns exist; no extra columns.
         rules = worksheet.data_validations.dataValidation
@@ -2010,40 +2012,43 @@ class ExcelValidationListExporterTest(TestCase):
         for column in BUSINESS_COLUMNS:
             self.assertIsNone(parsed.rows[0].values[column])
 
-    def test_household_status_formula_no_longer_checks_the_unreachable_rejected_clause(self):
-        # participant_status can only ever be VERIFIED/NOT_VERIFIED (see
-        # verification.py::resolve_participant_status) -- a COUNTIFS(...,
-        # "REJECTED") clause against it can never be true, so it shouldn't
-        # appear in the generated formula at all.
+    def test_household_status_formula_does_not_depend_on_participant_status(self):
+        # participant_status is VERIFIED on any answered primary_worker cell
+        # (Yes or No -- see verification.py::resolve_participant_status), so
+        # it can no longer be used to infer whether a primary worker was
+        # actually designated. household_status must derive VERIFIED/REJECTED
+        # straight from the count of Yes answers per household instead of
+        # reading the participant_status column at all.
         content = ExcelValidationListExporter(
             self._selection_result(member_count=2), "batch-1",
         ).export_bytes()
         worksheet = load_workbook(BytesIO(content))[VALIDATION_LIST_SHEET]
         formula = self._value(worksheet, "household_status")
-        self.assertNotIn('"REJECTED")>0', formula)
+        self.assertNotIn("COUNTIFS", formula)
         self.assertTrue(formula.startswith('=IF(SUMPRODUCT('))
-        self.assertIn('>1,"REJECTED",IF(COUNTIFS(', formula)
+        self.assertIn('>1,"REJECTED",IF(SUMPRODUCT(', formula)
 
     def test_verified_status_formula_accepts_the_same_spellings_as_the_upload_parser(self):
         from household_validation.upload import _parse_yes_no
-        from household_validation.verification import YES_VALUES, resolve_participant_status
+        from household_validation.verification import YES_VALUES, NO_VALUES, resolve_participant_status
 
         content = ExcelValidationListExporter(
             self._selection_result(), "batch-1",
         ).export_bytes()
         worksheet = load_workbook(BytesIO(content))[VALIDATION_LIST_SHEET]
         formula = self._value(worksheet, "participant_status")
-        # Every value the live in-sheet formula treats as a "YES" must be
-        # exactly what the upload-time parser accepts too -- otherwise the
-        # preview a field officer sees in Excel can disagree with the status
-        # actually saved once the file is uploaded.
+        # Every value the live in-sheet formula treats as an answered cell
+        # must be exactly what the upload-time parser accepts too (Yes or
+        # No) -- otherwise the preview a field officer sees in Excel can
+        # disagree with the status actually saved once the file is uploaded.
         embedded_values = set(re.findall(r'&""\)\)="([^"]+)"', formula))
-        self.assertEqual(embedded_values, set(YES_VALUES))
+        self.assertEqual(embedded_values, set(YES_VALUES) | set(NO_VALUES))
 
         for raw_value, expected in (
             ("YES", "VERIFIED"), (" yes ", "VERIFIED"), ("Y", "VERIFIED"),
             ("TRUE", "VERIFIED"), ("1", "VERIFIED"),
-            ("NO", "NOT_VERIFIED"), ("", "NOT_VERIFIED"), (None, "NOT_VERIFIED"),
+            ("NO", "VERIFIED"), ("n", "VERIFIED"), ("FALSE", "VERIFIED"), ("0", "VERIFIED"),
+            ("", "NOT_VERIFIED"), (None, "NOT_VERIFIED"),
             ("MAYBE", "NOT_VERIFIED"),
         ):
             with self.subTest(raw_value=raw_value):
@@ -3367,8 +3372,10 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(result["participant_updates"], 1)
         self.assertEqual(result["households_verified"], 1)
-        self.assertEqual(result["participants_verified"], 1)
-        self.assertEqual(result["participants_not_verified"], 2)
+        # member-1 (True) and member-2 (False) are both answered -> VERIFIED;
+        # member-3 (None/blank) is the only NOT_VERIFIED participant.
+        self.assertEqual(result["participants_verified"], 2)
+        self.assertEqual(result["participants_not_verified"], 1)
         self.assertEqual(result["households_not_verified"], 0)
 
     @patch("household_validation.services.parse_validation_workbook")
@@ -3423,10 +3430,15 @@ class UploadHardeningTest(TestCase):
         self,
         parse_workbook_mock,
     ):
+        # member-1/2 have blank (unanswered) primary_worker cells, so they
+        # stay NOT_VERIFIED; member-3 is answered (False, which would count
+        # as participant-VERIFIED -- but not household-VERIFIED, since that
+        # still requires a Yes -- if it weren't excluded) but its row errors
+        # out, proving errored rows are excluded from the counts entirely.
         rows = [
-            self._uploaded_row(2, "member-1", False),
-            self._uploaded_row(3, "member-2", False),
-            self._uploaded_row(4, "member-3", None),
+            self._uploaded_row(2, "member-1", None),
+            self._uploaded_row(3, "member-2", None),
+            self._uploaded_row(4, "member-3", False),
         ]
         parse_workbook_mock.return_value = SimpleNamespace(
             rows=rows,
@@ -4071,15 +4083,19 @@ class BusinessVerificationRulesTest(TestCase):
         from household_validation.verification import VERIFIED, NOT_VERIFIED, REJECTED
 
         # business no longer affects VERIFIED status at all -- included here
-        # only to prove it's still accepted/stored without changing `expected`.
+        # only to prove it's still accepted/stored without changing the
+        # expected statuses. Participant status is VERIFIED whenever
+        # primary_worker is answered at all (Yes or No); household status
+        # stays VERIFIED only once a primary worker is actually designated
+        # (Yes), so the two diverge on a plain "No" answer.
         scenarios = (
-            ("YES", "Yes", VERIFIED),
-            ("YES", "No", VERIFIED),
-            ("YES", None, VERIFIED),
-            ("NO", None, NOT_VERIFIED),
-            (None, None, NOT_VERIFIED),
+            ("YES", "Yes", VERIFIED, VERIFIED),
+            ("YES", "No", VERIFIED, VERIFIED),
+            ("YES", None, VERIFIED, VERIFIED),
+            ("NO", None, VERIFIED, NOT_VERIFIED),
+            (None, None, NOT_VERIFIED, NOT_VERIFIED),
         )
-        for worker, business, expected in scenarios:
+        for worker, business, expected_participant, expected_household in scenarios:
             with self.subTest(worker=worker, business=business):
                 workbook = ValidationUploadParserTest()._upload_workbook()
                 sheet = workbook[VALIDATION_LIST_SHEET]
@@ -4117,16 +4133,16 @@ class BusinessVerificationRulesTest(TestCase):
                     result = service.upload(content)
                 self.assertEqual(result["errors"], 0)
                 for status, suffix in ((VERIFIED, "verified"), (NOT_VERIFIED, "not_verified"), (REJECTED, "rejected")):
-                    for prefix in ("participants", "households"):
-                        key = f"{prefix}_{suffix}"
-                        self.assertEqual(result[key], int(expected == status))
-                        self.assertEqual(dry_run[key], result[key])
-                self.assertEqual(individual.json_ext["validation_status"], expected)
-                self.assertEqual(group.json_ext["validation_status"], expected)
-                self.assertEqual(replace_worker.call_count, int(expected == VERIFIED))
+                    self.assertEqual(result[f"participants_{suffix}"], int(expected_participant == status))
+                    self.assertEqual(result[f"households_{suffix}"], int(expected_household == status))
+                    self.assertEqual(dry_run[f"participants_{suffix}"], result[f"participants_{suffix}"])
+                    self.assertEqual(dry_run[f"households_{suffix}"], result[f"households_{suffix}"])
+                self.assertEqual(individual.json_ext["validation_status"], expected_participant)
+                self.assertEqual(group.json_ext["validation_status"], expected_household)
+                self.assertEqual(replace_worker.call_count, int(expected_household == VERIFIED))
                 self.assertEqual(
                     audit.call_args.kwargs["status"],
-                    HouseholdValidationBatchRow.Status.REJECTED if expected == REJECTED
+                    HouseholdValidationBatchRow.Status.REJECTED if expected_household == REJECTED
                     else HouseholdValidationBatchRow.Status.APPLIED,
                 )
 
@@ -4155,9 +4171,17 @@ class PwpVerificationRulesTest(TestCase):
     def test_pwp_verification_depends_only_on_primary_worker(self):
         from household_validation.verification import resolve_participant_status, resolve_household_status
 
-        for worker, expected in ((True, "VERIFIED"), (False, "NOT_VERIFIED"), (None, "NOT_VERIFIED")):
+        # A member is VERIFIED once Primary Worker is answered at all (Yes or
+        # No) -- they were checked on the ground, whether or not chosen as
+        # the primary worker. Blank is the only NOT_VERIFIED case.
+        for worker, expected in ((True, "VERIFIED"), (False, "VERIFIED"), (None, "NOT_VERIFIED")):
             with self.subTest(worker=worker):
                 self.assertEqual(resolve_participant_status(worker), expected)
+
+        # Household status stays keyed on an actual primary worker being
+        # designated (Yes), not merely answered.
+        for worker, expected in ((True, "VERIFIED"), (False, "NOT_VERIFIED"), (None, "NOT_VERIFIED")):
+            with self.subTest(worker=worker):
                 self.assertEqual(resolve_household_status([worker, False]), expected)
         self.assertEqual(resolve_household_status([True, True]), "REJECTED")
 
@@ -4165,8 +4189,13 @@ class PwpVerificationRulesTest(TestCase):
         fixture = ExcelValidationListExporterTest()
         for worker in ("YES", " yes ", "Y", "TRUE", "1", "NO", None):
             with self.subTest(worker=worker):
+                # Household VERIFIED still requires an actually-designated
+                # (Yes) primary worker; participant VERIFIED now just
+                # requires the cell to be answered at all (Yes or No).
                 verified = worker not in ("NO", None)
+                answered = worker is not None
                 expected = "VERIFIED" if verified else "NOT_VERIFIED"
+                expected_participant = "VERIFIED" if answered else "NOT_VERIFIED"
                 workbook = ExcelValidationListExporter(
                     fixture._selection_result(member_count=2), "batch-1",
                 ).export_workbook()
@@ -4203,8 +4232,8 @@ class PwpVerificationRulesTest(TestCase):
                     result = service.upload(content)
                 self.assertEqual(result["errors"], 0, result["error_messages"])
                 for key, count in {
-                    "participants_verified": int(verified),
-                    "participants_not_verified": 2 - int(verified),
+                    "participants_verified": int(answered),
+                    "participants_not_verified": 2 - int(answered),
                     "participants_rejected": 0,
                     "households_verified": int(verified),
                     "households_not_verified": int(not verified),
@@ -4212,7 +4241,7 @@ class PwpVerificationRulesTest(TestCase):
                 }.items():
                     self.assertEqual(result[key], count)
                     self.assertEqual(dry_run[key], count)
-                self.assertEqual(individuals[0].json_ext["validation_status"], expected)
+                self.assertEqual(individuals[0].json_ext["validation_status"], expected_participant)
                 self.assertEqual(individuals[1].json_ext["validation_status"], "NOT_VERIFIED")
                 self.assertEqual(group.json_ext["validation_status"], expected)
                 self.assertEqual(replace_worker.call_count, int(verified))

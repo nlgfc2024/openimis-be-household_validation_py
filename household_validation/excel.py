@@ -9,7 +9,8 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 from household_validation.identity import get_household_form_number
 from household_validation.verification import (
-    PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, BUSINESS_REJECTION_CODE, YES_VALUES,
+    PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, BUSINESS_REJECTION_CODE,
+    YES_VALUES, NO_VALUES,
 )
 
 
@@ -290,19 +291,21 @@ class ExcelValidationListExporter:
 
     def _write_status_formulas(self, worksheet):
         worker = self._column_letter("primary_worker")
-        participant = self._column_letter(PARTICIPANT_STATUS_COLUMN)
         group = self._column_letter("group_uuid")
         last = worksheet.max_row
         groups = f'${group}$2:${group}${last}'
         workers = f'${worker}$2:${worker}${last}'
-        statuses = f'${participant}$2:${participant}${last}'
         for row in range(2, last + 1):
-            # Use the same accepted spellings as the upload parser (YES_VALUES).
-            def matches(column, options=YES_VALUES):
+            # Use the same accepted spellings as the upload parser (YES/NO_VALUES).
+            def matches(column, options):
                 cell = f'UPPER(TRIM({column}{row}&""))'
                 return 'OR(' + ','.join(f'{cell}="{value}"' for value in options) + ')'
-            primary_yes = matches(worker)
-            participant_formula = f'=IF({primary_yes},"VERIFIED","NOT_VERIFIED")'
+            # A member is VERIFIED once Primary Worker is answered at all (Yes
+            # or No) -- that means they were checked on the ground, whether or
+            # not they were chosen as the primary worker. Matches
+            # verification.py::resolve_participant_status.
+            primary_answered = matches(worker, YES_VALUES + NO_VALUES)
+            participant_formula = f'=IF({primary_answered},"VERIFIED","NOT_VERIFIED")'
             worksheet.cell(
                 row, self.columns.index(PARTICIPANT_STATUS_COLUMN) + 1, participant_formula,
             )
@@ -310,11 +313,15 @@ class ExcelValidationListExporter:
                 f'(UPPER(TRIM({workers}&""))="{value}")'
                 for value in YES_VALUES
             )
+            # Household VERIFIED/REJECTED depend on the count of members
+            # actually designated as the primary worker (Yes), not merely
+            # answered -- unlike participant_status above, this can't be
+            # read off the participant_status column any more since that
+            # now also turns VERIFIED on a plain "No" answer.
             worker_count = f'SUMPRODUCT(--({groups}=${group}{row}),--(({worker_matches})>0))'
             household_formula = (
                 f'=IF({worker_count}>1,"REJECTED",'
-                f'IF(COUNTIFS({groups},${group}{row},{statuses},"VERIFIED")>0,'
-                f'"VERIFIED","NOT_VERIFIED"))'
+                f'IF({worker_count}>0,"VERIFIED","NOT_VERIFIED"))'
             )
             worksheet.cell(row, self.columns.index(HOUSEHOLD_STATUS_COLUMN) + 1, household_formula)
 
