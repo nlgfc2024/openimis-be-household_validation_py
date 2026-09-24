@@ -46,6 +46,7 @@ The integration extension also implements the backend surface required by the va
 - Region, district, TA/municipality, GVH, village, hotspot, and micro-catchment filter support.
 - Quota-based main-list selection plus a reserve/waiting list — see "Selection Algorithm" below.
 - Config-driven, backend-only eligibility rules and a simpler target-count selection for program-based deployments (e.g. Jobs Now) via `benefitPlanCode` — see "Program-Based Selection" below.
+- Config-driven, per-program Excel export/upload columns (`program_specific_export_columns`) — see "Program-specific export columns" below.
 
 Enrollment remains a reference workflow only. This module does not call enrollment mutations and does not create `GroupBeneficiaryProjectEnrollment` records.
 
@@ -95,7 +96,7 @@ The module configuration exposes these GraphQL permission keys:
 - `gql_query_household_validation_history_perms`
 - `gql_query_household_validation_error_report_perms`
 
-It also exposes `program_eligibility_rules`, which drives every selection algorithm described in "Selection Algorithm" above (none of these values are GraphQL arguments on `generateHouseholdValidationList`; update `ModuleConfiguration` for the `household_validation` module to change them):
+It also exposes `program_eligibility_rules` and `program_specific_export_columns`, which drive selection and Excel export/upload respectively (see "Selection Algorithm" and "Program-specific export columns" above — none of these values are GraphQL arguments on `generateHouseholdValidationList`; update `ModuleConfiguration` for the `household_validation` module to change them):
 
 - `program_eligibility_rules`: a dict keyed by benefit plan code (matched case-insensitively against the `benefitPlanCode` GraphQL argument), including a `"PWP"` entry used whenever `benefitPlanCode` is absent. A non-empty `benefitPlanCode` that matches no key here raises a `ValidationError` instead of falling back to `"PWP"`. Each value is a rule with these optional keys:
   - `selection_strategy`: **presence, not its value, is what matters.** Given as a dict, PWP's wealth-ranked, demographic-quota algorithm runs, configured by that dict's own keys (below). Omitted entirely, the simple algorithm runs instead — see "Program-Based Selection" above.
@@ -106,7 +107,10 @@ It also exposes `program_eligibility_rules`, which drives every selection algori
   - `member_min_age` / `member_max_age`: inclusive age bounds (derived from `Individual.dob`) a member must also fall within — a hard requirement.
   - `priority_flag`: (meaningful only when `selection_strategy` is absent) an `Individual.json_ext` boolean key that does **not** gate eligibility — it only ranks otherwise-eligible households ahead of the rest of the pool once the selection is capped at `targetCount`.
 
-  Default configuration (`household_validation/apps.py::DEFAULT_CONFIG`):
+  Default configuration (`household_validation/apps.py::DEFAULT_CONFIG`) ships **only `"PWP"`** —
+  RMEP/UPG (or any other program) are deployment-specific, not built-in defaults, and are added by
+  overriding this key wholesale in that deployment's `ModuleConfiguration`. See "Program-based
+  (Jobs Now) example" below for a worked RMEP/UPG example to copy from:
 
   ```python
   "program_eligibility_rules": {
@@ -118,66 +122,278 @@ It also exposes `program_eligibility_rules`, which drives every selection algori
               "reserve_percentage": 20,
           },
       },
-      "RMEP": {
-          "requires_data_source": "PWP",
-          "priority_flag": "business_experience",
-      },
-      "UPG": {
-          "requires_data_source": "SCTP",
-          "member_flag": "fit_for_work",
-          "member_min_age": 18,
-          "member_max_age": 60,
-      },
   }
   ```
 
-  In words: **PWP** requires a fit-for-work member, selected via the 40/40/20 wealth-ranked quota algorithm. **RMEP** requires a PWP-sourced member — households with such a member qualify whether or not that member also has business experience, but business-experienced households are selected first (up to `targetCount`) before any other PWP-sourced household fills the remaining slots. **UPG** requires an SCTP-sourced member who is fit for work and aged 18-60.
+  In words: **PWP** requires a fit-for-work member, selected via the 40/40/20 wealth-ranked quota
+  algorithm — this is the one entry the fallback logic actually depends on being present (see
+  below), and the one most deployments run largely unmodified. The "Program-based (Jobs Now)
+  example" below's **RMEP** requires a PWP-sourced member — households with such a member qualify
+  whether or not that member also has business experience, but business-experienced households are
+  selected first (up to `targetCount`) before any other PWP-sourced household fills the remaining
+  slots. Its **UPG** requires an SCTP-sourced member who is fit for work and aged 18-60.
 
   This key is intentionally **not exposed to the frontend**: this module's `ModuleConfiguration` row keeps the default `is_exposed = False`, and `resolve_module_configurations` (`openimis-be-core_py/core/schema.py`) only ever returns rows with `is_exposed = True` to GraphQL callers. A deployment overrides it by updating (or inserting) the `household_validation` module's `ModuleConfiguration` row directly (e.g. via Django admin), leaving `is_exposed` unchecked. A deployment override **replaces the whole `program_eligibility_rules` dict** (it isn't deep-merged with the default), so an override that only adds, say, RMEP-specific tweaks and forgets `"PWP"` doesn't break PWP-style generation on that deployment: `EligibleHouseholdSelectionService._resolve_eligibility_rule` falls back to the built-in default `"PWP"` rule (`household_validation/apps.py::DEFAULT_CONFIG`) whenever the resolved config has no `"PWP"` entry of its own, rather than an empty `{}` — an empty rule would silently make `select_households` run the "simple" algorithm instead of PWP's wealth-ranked quota one for every request that omits `benefitPlanCode`.
 
   **Migrating from the old flat quota keys:** before `program_eligibility_rules` existed, PWP's quota split was configured via flat top-level `ModuleConfiguration` keys — `female_headed_percentage`, `youth_percentage` (now `youth_headed_percentage`), `reserve_percentage`. Those keys are no longer read at all; the equivalent values now live at `program_eligibility_rules["PWP"]["selection_strategy"]`. A deployment whose saved `ModuleConfiguration` still sets any of the old keys won't get an error — `HouseholdValidationConfig._load_config` (`household_validation/apps.py`) logs a `logger.warning(...)` on startup naming exactly which stale keys it found, since silently ignoring a configured override is worse than a loud one-time log line. There's no automatic migration; update the deployment's `ModuleConfiguration` row to move the values into `selection_strategy` to silence the warning.
 
-## Business columns per deployment
+## Program-specific export columns
 
-`business_columns_enabled` controls business collection in newly generated validation
-workbooks. It defaults to `false`, including when the key is missing from an existing
-`household_validation` module configuration, so PWP workbooks omit:
+VERIFIED status depends **only** on Primary Worker. At the **participant** level, a
+member is `VERIFIED` once the Primary Worker cell is answered at all — `YES` or `NO`
+— meaning they were checked on the ground, whether or not they were chosen as the
+primary worker; only a blank cell is `NOT_VERIFIED`. At the **household** level, an
+actual primary worker still has to be designated: exactly one `YES` makes the
+household `VERIFIED` (shown on all its rows); no `YES` (even if some members
+answered `NO`) means `NOT_VERIFIED`; more than one `YES` means `REJECTED` and blocks
+household updates. No other column — business or otherwise — affects either status;
+they're all optional, informational fields
+(`household_validation/verification.py::resolve_participant_status`/
+`resolve_household_status`).
 
-- Does member has a business
-- Type of Business
-- Business Period (in years)
-- The hidden Business Type Options worksheet and its business dropdowns/validation rules
+Beyond the base schema (`household_validation/excel.py::EXCEL_COLUMNS`), each Program
+can define its own extra Excel columns via the `program_specific_export_columns`
+`ModuleConfiguration` key (backend-only, `is_exposed = False`, same as
+`program_eligibility_rules` above). Same "PWP-only ships by default" rule as
+`program_eligibility_rules`: only `"PWP"`'s 3 business columns are in
+`DEFAULT_CONFIG` — RMEP/UPG's columns are in "Program-based (Jobs Now) example" below for a
+deployment to copy in. Each entry is a list of column definitions:
 
-For Jobs-Now/RMEP, merge this setting into the existing `ModuleConfiguration` for
-`household_validation`, preserving its other configuration keys:
-
-```json
-{
-  "business_columns_enabled": true
+```python
+"program_specific_export_columns": {
+    "PWP": [
+        {
+            "key": "has_business",
+            "column_name": "Does member has a business",
+            "target_individual_json_ext_key": "business_experience",
+            "type": "select",
+            "options": ["Yes", "No"],
+            "required": False,
+        },
+        {
+            "key": "business_type",
+            "column_name": "Type of Business",
+            "target_individual_json_ext_key": "type_of_business",
+            "type": "select",
+            "options": ["Crop farming", "Livestock farming", "..."],
+            "required": True,
+            "depends_on": {"key": "has_business", "equals": "Yes"},
+        },
+        {
+            "key": "business_duration",
+            "column_name": "Business Period (in years)",
+            "target_individual_json_ext_key": "business_period",
+            "type": "number",
+            "min": 0, "max": 100,
+            "required": True,
+            "depends_on": {"key": "has_business", "equals": "Yes"},
+        },
+    ],
 }
 ```
 
-Use JSON booleans (`true`/`false`), not strings. `business_type_options` continues to
-configure the business choices when enabled. Restart the backend after updating the
-configuration and generate a new workbook. No database schema migration or frontend
-change is required. Primary Worker and Project dropdowns remain available in both modes.
+Field meanings:
 
-The flag controls workbook generation and the verification policy used during upload.
-Previously issued workbooks with or without business columns remain uploadable; missing
-columns preserve stored business data. The server configuration selects the policy,
-not the presence of columns or status values in an uploaded workbook.
+- `key`: stable id, referenced by `depends_on` and used as the upload-side parsing
+  registry's lookup key. Not shown to the field officer.
+- `column_name`: the Excel header text.
+- `target_individual_json_ext_key`: where the value is stored/read on
+  `Individual.json_ext`.
+- `type`: `"select"` (dropdown from `options`), `"number"` (optional `min`/`max`
+  bounds), or `"text"` (freeform, no validation).
+- `required`: when `depends_on` is absent or satisfied for a row, a blank value is an
+  upload row-error — but this **never** affects VERIFIED status.
+- `depends_on` (optional): `{key, equals}` — the cell is only editable (export) and only
+  checked/required (upload) when the referenced column's value on that row equals
+  `equals`. A dependency left unanswered leaves the column's stored value untouched; an
+  explicit non-matching answer (e.g. `has_business = No`) clears it.
 
-- PWP (`false`): Primary Worker `YES` makes that participant `VERIFIED`; `NO` or blank
-  makes them `NOT_VERIFIED`. Exactly one primary worker makes the household `VERIFIED`,
-  with that household status shown on all its rows. No primary worker means
-  `NOT_VERIFIED`; multiple primary workers mean `REJECTED` and block household updates.
-  Business answers are not required for verification, and selecting a primary worker
-  does not create or overwrite stored business answers.
-- Jobs-Now/RMEP (`true`): use the business verification rules described below.
-  A primary worker still needs a Business `Yes` or `No` answer to be verified.
+`generateHouseholdValidationList`/`householdValidationPreview`'s `benefitPlanCode`
+resolves which program's columns are used
+(`EligibleHouseholdSelectionService._resolve_export_columns`), falling back to `"PWP"`'s
+columns only when `benefitPlanCode` is absent — the same fallback pattern as
+`program_eligibility_rules`, but resolved independently: a deployment can configure
+eligibility without export columns, or vice versa.
 
-Excel/LibreOffice formulas, upload dry-run counts, and persisted statuses use the same
-deployment policy. Regenerate old PWP workbooks to obtain the updated formulas.
+Upload never requires these columns as headers — a workbook missing one just gets
+`None` for that field on every row, and `parse_validation_workbook` doesn't know (or
+need to know) which program a given workbook was exported for: it validates whatever
+configured columns it finds, across every program's definitions merged together
+(`upload.py::_column_registry`/`_parse_extra_columns`). Since two programs can share a
+column `key` (PWP and RMEP both have `has_business`) with different `options`/bounds,
+the merge is permissive rather than picking one arbitrarily: `upload.py::_merge_columns`
+unions `options`, widens numeric `min`/`max`, and only keeps `required` when every
+definition that shares the key agrees — so a value valid under *either* program's rule
+is accepted, rather than whichever program happened to merge last silently winning.
+
+### Program-based (Jobs Now) example
+
+A worked example of a Jobs Now (RMEP/UPG) `ModuleConfiguration` override. Not loaded
+automatically — paste the `program_eligibility_rules`/`program_specific_export_columns`
+entries you need into the `household_validation` module's `ModuleConfiguration.config`
+(layer `be`) via Django admin, and update the `"RMEP"`/`"UPG"` keys first to match this
+deployment's actual `BenefitPlan.code` values (see the note on `program_eligibility_rules`'
+top-level keys above).
+
+```json
+{
+  "program_eligibility_rules": {
+    "RMEP": {
+      "requires_data_source": "PWP",
+      "priority_flag": "business_experience"
+    },
+    "UPG": {
+      "requires_data_source": "SCTP",
+      "member_flag": "fit_for_work",
+      "member_min_age": 18,
+      "member_max_age": 60
+    }
+  },
+  "program_specific_export_columns": {
+    "RMEP": [
+      {
+        "key": "has_business",
+        "column_name": "Does member has a business",
+        "target_individual_json_ext_key": "business_experience",
+        "type": "select",
+        "options": ["Yes", "No"],
+        "required": false
+      },
+      {
+        "key": "business_type",
+        "column_name": "Type of Business",
+        "target_individual_json_ext_key": "type_of_business",
+        "type": "select",
+        "required": true,
+        "depends_on": {"key": "has_business", "equals": "Yes"},
+        "options": [
+          "Rice production", "rice aggregation/trading", "rice milling", "rice packaging/marketing", "input supply",
+          "Cattle production/fattening", "cattle aggregation/trading", "meat retailing",
+          "livestock feed/input supply", "livestock services",
+          "Beekeeping", "honey harvesting", "honey processing/packaging", "honey aggregation/marketing",
+          "beekeeping equipment",
+          "Soybean production", "aggregation/trading", "soybean processing", "livestock/feed production",
+          "Groundnut production", "peanut butter processing", "sorting/packaging",
+          "Fruit production/aggregation", "fruit processing/drying", "packaging/marketing",
+          "macadamia production/aggregation", "processing",
+          "Sunflower production", "oil pressing/processing", "sunflower cake/feed production",
+          "Goat production", "goat aggregation/trading", "livestock feed", "animal-health services",
+          "Broiler production", "layer/egg production", "poultry feed", "chick/input supply", "poultry trading",
+          "Vegetable production", "aggregation", "vegetable trading", "processing/drying",
+          "Dairy production", "milk collection/bulking", "milk processing", "yoghurt and other dairy products",
+          "milk retailing",
+          "fresh produce trading", "processing/packaging", "egg production",
+          "Tea production/smallholder supply", "tea nurseries", "green-leaf aggregation/transport",
+          "tea-related services",
+          "Pineapple and banana production", "fruit aggregation", "fruit trading",
+          "rice aggregation", "packaging", "rice trading",
+          "Fish production", "fish trading", "fish processing/drying", "fish aggregation", "fish feed/input supply",
+          "Cassava production", "cassava flour processing", "cassava snacks/chips", "cassava trading"
+        ]
+      },
+      {
+        "key": "business_duration",
+        "column_name": "Business Period (in years)",
+        "target_individual_json_ext_key": "business_period",
+        "type": "number",
+        "min": 0,
+        "max": 100,
+        "required": true,
+        "depends_on": {"key": "has_business", "equals": "Yes"}
+      },
+      {
+        "key": "business_capital",
+        "column_name": "Business Capital",
+        "target_individual_json_ext_key": "business_capital",
+        "type": "number",
+        "min": 0,
+        "required": false,
+        "depends_on": {"key": "has_business", "equals": "Yes"}
+      },
+      {
+        "key": "business_skills",
+        "column_name": "Business Skills",
+        "target_individual_json_ext_key": "business_skills",
+        "type": "select",
+        "required": false,
+        "depends_on": {"key": "has_business", "equals": "Yes"},
+        "options": [
+          "Formal training",
+          "Apprenticeship",
+          "Learned from family/community",
+          "Self-taught",
+          "Previous work/business experience"
+        ]
+      },
+      {
+        "key": "prior_knowledge",
+        "column_name": "Prior Knowledge",
+        "target_individual_json_ext_key": "prior_knowledge",
+        "type": "select",
+        "required": false,
+        "depends_on": {"key": "has_business", "equals": "Yes"},
+        "options": [
+          "Technical/Production",
+          "Business management",
+          "Financial literacy",
+          "Marketing/sales"
+        ]
+      }
+    ],
+    "UPG": [
+      {
+        "key": "savings_experience",
+        "column_name": "Savings Experience",
+        "target_individual_json_ext_key": "savings_experience",
+        "type": "select",
+        "options": ["Yes", "No"],
+        "required": false
+      },
+      {
+        "key": "willingness_to_participate",
+        "column_name": "Willingness to Participate",
+        "target_individual_json_ext_key": "willingness_to_participate",
+        "type": "select",
+        "options": ["Yes", "No"],
+        "required": false
+      },
+      {
+        "key": "sanitary_facilities",
+        "column_name": "Sanitary Facilities",
+        "target_individual_json_ext_key": "sanitary_facilities",
+        "type": "select",
+        "required": false,
+        "options": ["Toilet", "Mponda gear", "Kitchen", "Rubbish pit", "Bathroom"]
+      }
+    ]
+  }
+}
+```
+
+### `export_column_options_overrides`
+
+For the common case — a deployment that's otherwise happy with the built-in PWP
+defaults but wants different `business_type` choices — redeclaring the whole
+`program_specific_export_columns["PWP"]` list is more than necessary. The
+`export_column_options_overrides` `ModuleConfiguration` key swaps just a column's `options`,
+keyed by the column's `key` (not by program):
+
+```json
+{
+  "export_column_options_overrides": {
+    "business_type": ["Rice farming", "Retail shop", "Transport services"]
+  }
+}
+```
+
+is a complete, valid override on its own — no need to touch `program_eligibility_rules`
+or `program_specific_export_columns` at all. Applied by
+`apps.py::apply_column_option_overrides`, called from both the export path
+(`_resolve_export_columns`) and the upload path (`_column_registry`) so the two stay
+consistent. It applies wherever the column `key` appears across *every* configured
+program — if a deployment later runs PWP and RMEP with genuinely different
+`business_type` options again, use each program's own `program_specific_export_columns`
+entry instead of this key for that column.
 
 ## GraphQL Backend Testing
 
@@ -447,8 +663,8 @@ Expected upload behavior:
 - Generated workbooks hide internal `batch_id`, `group_uuid`, `member_uuid`, `row_type`, and `project_id` columns. Their locked values remain in the file for upload matching and household formulas. Form Number and National ID remain visible. Do not delete the hidden columns.
 
 - `rowsRead` counts every non-empty participant row encountered in the workbook, including rows that later fail validation.
-- Generated workbooks contain protected `participant_status` and `household_status` formulas that recalculate as officers fill the sheet. Upload recomputes these statuses from inputs, ignoring uploaded status values. In PWP, Primary Worker `Yes` is enough to verify the participant. With business columns enabled (Jobs-Now), Primary Worker `Yes` with Business `No`, or Business `Yes` with a configured type and valid period, is `VERIFIED`. Missing answers/details are `NOT_VERIFIED`. Non-primary workers are `NOT_VERIFIED`; business answers on those rows are upload errors that block household updates.
-- A household is `REJECTED` if any member is rejected or more than one primary worker is selected. Otherwise it is `VERIFIED` if it has a verified primary worker, and `NOT_VERIFIED` otherwise. A member's own status remains independent of other members' results. Missing business columns in older files count as blank for Jobs-Now verification; PWP verification does not depend on business answers. Missing columns preserve stored business data in both modes.
+- Generated workbooks contain protected `participant_status` and `household_status` formulas that recalculate as officers fill the sheet. Upload recomputes these statuses from inputs, ignoring uploaded status values. A participant is `VERIFIED` once Primary Worker is answered at all — `Yes` or `No` — meaning they were checked on the ground whether or not chosen as the primary worker; only a blank Primary Worker cell is `NOT_VERIFIED`. Business (or any other extra column) never affects this status.
+- A household is `REJECTED` if any member is rejected or more than one primary worker is selected. Otherwise it is `VERIFIED` only once a primary worker is actually designated (`Yes`), and `NOT_VERIFIED` otherwise — even if every member answered `No`. A member's own participant status remains independent of other members' results and of the household's status.
 - Primary Worker dropdowns allow at most one `YES` per household, matched by hidden `group_uuid` across the whole sheet. When another member is `YES`, only `NO` is available and a Stop error blocks typing a second `YES`. Clear the current selection or change it to `NO` before selecting a different worker. Conflicting `YES` cells are highlighted red if pasted data bypasses validation; upload retains its existing household rejection check.
 - Generated workbooks always leave `primary_worker`, `validation_notes`, and any enabled business columns blank for fresh field collection, even when saved answers exist. Export does not change those saved answers or suggest a Primary Worker from `recipient_type`.
 - Business fields require Primary Worker `YES`. Business Type and Period also require Business `Yes`; Period requires a selected type. Unavailable cells retain the household row colours, have no applicable dropdown choices and reject invalid typed entries. Existing values become red when their prerequisites are removed; clear them before uploading. This is validation, not dynamic cell protection or automatic clearing. Upload enforces the worker prerequisite even when copy/paste bypasses workbook rules. Generate a new workbook to receive these rules.
@@ -492,8 +708,11 @@ Implemented and verified against the real test suite:
 - `select_households` is a single function driven by whether the resolved rule's `selection_strategy` key is present: a dict (PWP's wealth/demographic-quota allocation, percentages read from that dict) or absent (program-based — no wealth/PMT computation, ordered by `priority_flag`, capped at `targetCount` with no reserve list).
 - PWP's female-headed/youth/reserve percentages moved from flat `female_headed_percentage`/`youth_headed_percentage`/`reserve_percentage` `ModuleConfiguration` keys into `program_eligibility_rules["PWP"]["selection_strategy"]`; `household_validation/tests.py` was updated to pass a `rule={"selection_strategy": {...}}` argument to `select_households` in place of the old `patch.object(HouseholdValidationConfig, "...")` calls.
 - Dedicated coverage for the pieces a config/algorithm refactor like this can silently break: `EligibleMember.is_eligible` (`EligibleMemberIsEligibleTest`), `EligibleHouseholdSelectionService._resolve_eligibility_rule` including its case-insensitive matching and PWP fallback (`ResolveEligibilityRuleTest`), and the full `generate()` path end-to-end for no-`benefitPlanCode`/`RMEP`/`UPG` (`ProgramBasedGenerationIntegrationTest`). That last class is what actually exercises "an existing PWP deployment that never sends `benefitPlanCode` keeps running the same quota/reserve algorithm as before" — the isolated `select_households` unit tests above all pass an explicit `rule=`, so none of them alone proved that end-to-end default path still works.
-- A deployment whose saved `ModuleConfiguration` still sets the retired flat `female_headed_percentage`/`youth_percentage`/`reserve_percentage` keys (now under `program_eligibility_rules["PWP"]["selection_strategy"]`) gets a startup `logger.warning` naming exactly which stale keys it found, rather than the override silently doing nothing (`HouseholdValidationConfig._load_config`, `RETIRED_CONFIG_KEYS`).
-- `parse_validation_workbook` requires the business columns (`has_business`, `business_type`, `business_duration`) as upload headers when `business_columns_enabled` is on (`upload.py::_required_upload_columns`).
+- A deployment whose saved `ModuleConfiguration` still sets a retired key (the flat `female_headed_percentage`/`youth_percentage`/`reserve_percentage` quota keys, or `business_columns_enabled`/`business_type_options`) gets a startup `logger.warning` naming exactly which stale keys it found, rather than the override silently doing nothing (`HouseholdValidationConfig._load_config`, `RETIRED_CONFIG_KEYS`).
+- PWP's business columns (`has_business`/`business_type`/`business_duration`), and RMEP/UPG's own extra columns, moved from the `business_columns_enabled` boolean into the fully config-driven `program_specific_export_columns` — see "Program-specific export columns" above. VERIFIED status was also fixed to depend only on Primary Worker; it previously required a valid business answer too when `business_columns_enabled` was on.
+- Only `"PWP"` ships in `DEFAULT_CONFIG` for both `program_eligibility_rules` and `program_specific_export_columns` — RMEP/UPG moved out to the "Program-based (Jobs Now) example" above since every real deployment replaces that content with its own program codes/columns anyway. An `export_column_options_overrides` `ModuleConfiguration` key lets a deployment swap just a column's `options` (e.g. `business_type`) without redeclaring either config — see "`export_column_options_overrides`" above.
+- The accepted Primary Worker spellings (`YES`/`Y`/`TRUE`/`1`) are defined once, in `verification.py::YES_VALUES`, and imported by both `upload.py`'s parser and `excel.py`'s live in-sheet `VERIFIED`/`NOT_VERIFIED` formula — previously the same 4 values were hardcoded independently in both places, with no test catching drift if only one copy was ever updated. The household-status formula's `COUNTIFS(...,"REJECTED")` clause (checking whether any row's `participant_status` was itself `"REJECTED"`) was also removed: `participant_status` can only ever be `VERIFIED`/`NOT_VERIFIED`, so that clause was always false.
+- `resolve_participant_status` was corrected: a member is `VERIFIED` once Primary Worker is answered at all (`Yes` *or* `No`, i.e. `NO_VALUES` now also counts), not only on `Yes` — a `No` answer still means the member was checked on the ground, just not chosen as the primary worker. `resolve_household_status`'s own `VERIFIED`/`REJECTED` semantics are unchanged (still keyed on an actual `Yes`). Since `household_status`'s live Excel formula could no longer infer "a primary worker was designated" from the `participant_status` column once that column also turns `VERIFIED` on `No`, it was rewritten to read the `primary_worker` answers directly instead of `COUNTIFS(...,"VERIFIED")` against `participant_status`.
 
 Local verification commands (this module's package resolved from a checkout via `PYTHONPATH`, since the project venv otherwise has `household_validation` installed as a separate site-packages copy):
 
@@ -510,9 +729,10 @@ PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" ../.venv/bin/python manage.py t
 Latest local result:
 
 ```text
-Found 158 test(s).
-Ran 158 tests in 0.8s
-All 158 tests pass
+Found 161 test(s).
+Ran 161 tests in 0.7s
 OK
 ```
+
+All 161 tests pass.
 
