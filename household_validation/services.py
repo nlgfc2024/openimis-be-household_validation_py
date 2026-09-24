@@ -16,7 +16,6 @@ from project_social_protection.models import Project
 
 from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig
 from household_validation.excel import (
-    HAS_BUSINESS_COLUMN,
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
 )
@@ -43,7 +42,7 @@ from household_validation.upload import (
 from household_validation.wealth import get_household_pmt_score, get_household_wealth_quintile
 from household_validation.verification import (
     VERIFIED, NOT_VERIFIED, REJECTED, BUSINESS_REJECTION_CODE,
-    participant_status, household_status,
+    resolve_participant_status, resolve_household_status,
 )
 
 
@@ -64,10 +63,7 @@ def _json_safe(value):
 
 class HouseholdValidationUploadService:
     def __init__(self, user=None):
-        from household_validation.apps import HouseholdValidationConfig
-
         self.user = user
-        self.business_columns_enabled = HouseholdValidationConfig.business_columns_enabled
         self._group_cache = {}
         self._upload_attempt_id = None
         self._member_details_changed_group_ids = set()
@@ -114,12 +110,10 @@ class HouseholdValidationUploadService:
         for row in parsed.rows:
             group_key = self._uploaded_group_key(row)
             if group_key in participant_update_group_keys:
-                decision_rows.setdefault(group_key, []).append(
-                    (row.primary_worker, row.values.get(HAS_BUSINESS_COLUMN))
-                )
+                decision_rows.setdefault(group_key, []).append(row.primary_worker)
         decisions = {
-            key: household_status(rows, business_columns_enabled=self.business_columns_enabled)
-            for key, rows in decision_rows.items()
+            key: resolve_household_status(primary_workers)
+            for key, primary_workers in decision_rows.items()
         }
         totals["households_rejected"] = sum(
             status == REJECTED for status in decisions.values()
@@ -137,11 +131,7 @@ class HouseholdValidationUploadService:
                 ),
                 household_status=decisions.get(self._uploaded_group_key(uploaded_row)),
                 participant_status=(
-                    participant_status(
-                        uploaded_row.primary_worker,
-                        uploaded_row.values.get(HAS_BUSINESS_COLUMN),
-                        business_columns_enabled=self.business_columns_enabled,
-                    )
+                    resolve_participant_status(uploaded_row.primary_worker)
                     if self._uploaded_group_key(uploaded_row) in participant_update_group_keys
                     else None
                 ),
@@ -307,10 +297,9 @@ class HouseholdValidationUploadService:
                 continue
             projected = self._projected_primary_workers(group_rows)
             if projected is not None:
-                statuses[group_key] = household_status([
-                    (row.primary_worker, row.values.get(HAS_BUSINESS_COLUMN))
-                    for row in group_rows
-                ], business_columns_enabled=self.business_columns_enabled) == VERIFIED
+                statuses[group_key] = resolve_household_status(
+                    row.primary_worker for row in group_rows
+                ) == VERIFIED
         return statuses
 
     def _primary_worker_rejections(
