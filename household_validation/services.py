@@ -1315,22 +1315,20 @@ class EligibleHouseholdSelectionService:
         return MicroCatchment.objects.filter(identity_filter, validity_to__isnull=True).first()
 
     def _resolve_eligibility_rule(self, benefit_plan_code):
-        """Eligibility + selection-strategy rule for the given Program
-        (benefit plan code).
+        """Eligibility + selection-strategy rule for the given Program (benefit plan code).
 
-        Falls back to the ``"PWP"`` entry of ``program_eligibility_rules``
-        only when ``benefit_plan_code`` is falsy (no Program selected). If a
-        deployment's ``ModuleConfiguration`` override of
-        ``program_eligibility_rules`` omits ``"PWP"`` entirely (that key
-        isn't deep-merged with the default — an override replaces the whole
-        dict), this falls back further to the built-in default PWP rule
-        rather than an empty ``{}``: an empty rule would silently make
-        ``select_households`` run the "simple" (program-based) algorithm
-        instead of PWP's wealth-ranked quota one, which is exactly the kind
-        of silent wrong-algorithm failure this method exists to avoid.
+        Resolution follows the configured ``HouseholdValidationConfig.program_eligibility_rules`` mapping:
+            * If ``benefit_plan_code`` is provided, return the rule configured for that Program.
+            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"`` rule as the default.
 
-        A non-empty ``benefit_plan_code`` that matches no configured rule
-        still raises, rather than falling back to PWP at all.
+        Deployment overrides replace the entire ``program_eligibility_rules`` mapping rather than
+        being deep-merged with the default configuration. Therefore, if an override omits the
+        ``"PWP"`` key, this method falls back to the built-in default PWP rule instead of returning
+        an empty mapping. This safeguards against silently applying the wrong household-selection
+        algorithm. An empty rule would cause ``select_households`` to use the default program-based
+        selection logic rather than PWP's wealth-ranked, quota-based selection strategy. Unlike the
+        no-Program case, an unknown non-empty ``benefit_plan_code`` does not fall back to PWP and
+        instead raises a ``ValidationError``.
         """
         rules = getattr(HouseholdValidationConfig, "program_eligibility_rules", None) or {}
         rules = {str(code).upper(): rule for code, rule in rules.items()}
@@ -1345,14 +1343,19 @@ class EligibleHouseholdSelectionService:
 
     def _resolve_export_columns(self, benefit_plan_code):
         """Extra Excel export/upload columns for the given Program.
-        
-        Resolution follows the configured ``HouseholdValidationConfig.program_specific_export_columns`` mapping:
-            * If ``benefit_plan_code`` is provided, return the columns configured for that Program. Unknown Program codes resolve to ``[]``.
-            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"`` configuration as the default.
-        
-        Deployment overrides replace the entire ``program_specific_export_columns`` mapping rather than being deep-merged with the default configuration. 
-        Therefore, if an override omits the ``"PWP"`` key, this method falls back to the built-in default PWP columns instead of returning an empty list. 
-        This safeguards against silently generating incomplete Excel exports where all program-specific columns would otherwise be omitted.
+
+        Resolution follows the configured
+        ``HouseholdValidationConfig.program_specific_export_columns`` mapping:
+            * If ``benefit_plan_code`` is provided, return the columns configured for that
+              Program. Unknown Program codes resolve to ``[]``.
+            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"``
+              configuration as the default.
+
+        Deployment overrides replace the entire ``program_specific_export_columns`` mapping
+        rather than being deep-merged with the default configuration. Therefore, if an override
+        omits the ``"PWP"`` key, this method falls back to the built-in default PWP columns
+        instead of returning an empty list. This safeguards against silently generating
+        incomplete Excel exports where all program-specific columns would otherwise be omitted.
         """
         columns = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
         columns = {str(code).upper(): value for code, value in columns.items()}
