@@ -117,7 +117,7 @@ OTHER_PROGRAM_EXPORT_COLUMNS = [
         "required": False,
     },
 ]
-HAS_BUSINESS_COLUMN = "Does member has a business"
+HAS_BUSINESS_COLUMN = "Does member have a business"
 BUSINESS_TYPE_COLUMN = "Type of Business"
 BUSINESS_DURATION_COLUMN = "Business Period (in years)"
 BUSINESS_COLUMNS = {HAS_BUSINESS_COLUMN, BUSINESS_TYPE_COLUMN, BUSINESS_DURATION_COLUMN}

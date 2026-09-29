@@ -142,7 +142,7 @@ DEFAULT_CONFIG = {
         "PWP": [
             {
                 "key": "has_business",
-                "column_name": "Does member has a business",
+                "column_name": "Does member have a business",
                 "target_individual_json_ext_key": "business_experience",
                 "type": "select",
                 "options": ["Yes", "No"],
