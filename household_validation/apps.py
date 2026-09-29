@@ -211,8 +211,10 @@ class HouseholdValidationConfig(AppConfig):
         stale_keys = [key for key in RETIRED_CONFIG_KEYS if key in cfg]
         if stale_keys:
             logger.warning(
-                "household_validation ModuleConfiguration still sets %s, which no longer has any effect."
-                "Refer to the household_validation ModuleConfiguration documentation for the current config keys.",
+                "household_validation ModuleConfiguration still sets %s, "
+                "which no longer has any effect. "
+                "Refer to the household_validation ModuleConfiguration "
+                "documentation for the current config keys.",
                 ", ".join(stale_keys),
             )
         for field in cfg:
