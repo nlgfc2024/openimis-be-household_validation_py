@@ -45,6 +45,7 @@ LEGACY_COLUMN_ALIASES = {
     "business experience": "has_business",
     "has business": "has_business",
     "does member have a business": "has_business",
+    "does member has a business": "has_business",
     "type of business": "business_type",
     "business type": "business_type",
     "business period": "business_duration",
