@@ -14,9 +14,8 @@ from individual.services import GroupIndividualService, IndividualService
 from location.models import Hotspot, MicroCatchment
 from project_social_protection.models import Project
 
-from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig
+from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig, apply_column_option_overrides
 from household_validation.excel import (
-    HAS_BUSINESS_COLUMN,
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
 )
@@ -43,7 +42,7 @@ from household_validation.upload import (
 from household_validation.wealth import get_household_pmt_score, get_household_wealth_quintile
 from household_validation.verification import (
     VERIFIED, NOT_VERIFIED, REJECTED, BUSINESS_REJECTION_CODE,
-    participant_status, household_status,
+    resolve_participant_status, resolve_household_status,
 )
 
 
@@ -64,10 +63,7 @@ def _json_safe(value):
 
 class HouseholdValidationUploadService:
     def __init__(self, user=None):
-        from household_validation.apps import HouseholdValidationConfig
-
         self.user = user
-        self.business_columns_enabled = HouseholdValidationConfig.business_columns_enabled
         self._group_cache = {}
         self._upload_attempt_id = None
         self._member_details_changed_group_ids = set()
@@ -114,12 +110,10 @@ class HouseholdValidationUploadService:
         for row in parsed.rows:
             group_key = self._uploaded_group_key(row)
             if group_key in participant_update_group_keys:
-                decision_rows.setdefault(group_key, []).append(
-                    (row.primary_worker, row.values.get(HAS_BUSINESS_COLUMN))
-                )
+                decision_rows.setdefault(group_key, []).append(row.primary_worker)
         decisions = {
-            key: household_status(rows, business_columns_enabled=self.business_columns_enabled)
-            for key, rows in decision_rows.items()
+            key: resolve_household_status(primary_workers)
+            for key, primary_workers in decision_rows.items()
         }
         totals["households_rejected"] = sum(
             status == REJECTED for status in decisions.values()
@@ -137,11 +131,7 @@ class HouseholdValidationUploadService:
                 ),
                 household_status=decisions.get(self._uploaded_group_key(uploaded_row)),
                 participant_status=(
-                    participant_status(
-                        uploaded_row.primary_worker,
-                        uploaded_row.values.get(HAS_BUSINESS_COLUMN),
-                        business_columns_enabled=self.business_columns_enabled,
-                    )
+                    resolve_participant_status(uploaded_row.primary_worker)
                     if self._uploaded_group_key(uploaded_row) in participant_update_group_keys
                     else None
                 ),
@@ -307,10 +297,9 @@ class HouseholdValidationUploadService:
                 continue
             projected = self._projected_primary_workers(group_rows)
             if projected is not None:
-                statuses[group_key] = household_status([
-                    (row.primary_worker, row.values.get(HAS_BUSINESS_COLUMN))
-                    for row in group_rows
-                ], business_columns_enabled=self.business_columns_enabled) == VERIFIED
+                statuses[group_key] = resolve_household_status(
+                    row.primary_worker for row in group_rows
+                ) == VERIFIED
         return statuses
 
     def _primary_worker_rejections(
@@ -905,6 +894,7 @@ class EligibleHouseholdSelectionService:
         self.user = user
         self._project_name_cache = {}
         self._eligibility_rule = None
+        self._export_columns = None
 
     @property
     def eligibility_rule(self):
@@ -913,6 +903,13 @@ class EligibleHouseholdSelectionService:
         ``benefit_plan_code`` was given). ``None`` before any of those have
         run."""
         return self._eligibility_rule
+
+    @property
+    def export_columns(self):
+        """The extra Excel columns resolved by the most recent
+        select/candidates/generate call. ``None`` before any of those have
+        run."""
+        return self._export_columns
 
     def select(
         self,
@@ -987,6 +984,7 @@ class EligibleHouseholdSelectionService:
         benefit_plan_code=None,
     ):
         self._eligibility_rule = self._resolve_eligibility_rule(benefit_plan_code)
+        self._export_columns = self._resolve_export_columns(benefit_plan_code)
         queryset = self._base_queryset()
         queryset = self._apply_location_filters(
             queryset,
@@ -1019,6 +1017,7 @@ class EligibleHouseholdSelectionService:
         on the same response, so callers get a single request/response.
         """
         self._eligibility_rule = self._resolve_eligibility_rule(filters.get("benefit_plan_code"))
+        self._export_columns = self._resolve_export_columns(filters.get("benefit_plan_code"))
         base_queryset = self._base_queryset()
         catchment_id = filters.get("catchment_id")
         catchment_code = filters.get("catchment_code")
@@ -1316,22 +1315,20 @@ class EligibleHouseholdSelectionService:
         return MicroCatchment.objects.filter(identity_filter, validity_to__isnull=True).first()
 
     def _resolve_eligibility_rule(self, benefit_plan_code):
-        """Eligibility + selection-strategy rule for the given Program
-        (benefit plan code).
+        """Eligibility + selection-strategy rule for the given Program (benefit plan code).
 
-        Falls back to the ``"PWP"`` entry of ``program_eligibility_rules``
-        only when ``benefit_plan_code`` is falsy (no Program selected). If a
-        deployment's ``ModuleConfiguration`` override of
-        ``program_eligibility_rules`` omits ``"PWP"`` entirely (that key
-        isn't deep-merged with the default — an override replaces the whole
-        dict), this falls back further to the built-in default PWP rule
-        rather than an empty ``{}``: an empty rule would silently make
-        ``select_households`` run the "simple" (program-based) algorithm
-        instead of PWP's wealth-ranked quota one, which is exactly the kind
-        of silent wrong-algorithm failure this method exists to avoid.
+        Resolution follows the configured ``HouseholdValidationConfig.program_eligibility_rules`` mapping:
+            * If ``benefit_plan_code`` is provided, return the rule configured for that Program.
+            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"`` rule as the default.
 
-        A non-empty ``benefit_plan_code`` that matches no configured rule
-        still raises, rather than falling back to PWP at all.
+        Deployment overrides replace the entire ``program_eligibility_rules`` mapping rather than
+        being deep-merged with the default configuration. Therefore, if an override omits the
+        ``"PWP"`` key, this method falls back to the built-in default PWP rule instead of returning
+        an empty mapping. This safeguards against silently applying the wrong household-selection
+        algorithm. An empty rule would cause ``select_households`` to use the default program-based
+        selection logic rather than PWP's wealth-ranked, quota-based selection strategy. Unlike the
+        no-Program case, an unknown non-empty ``benefit_plan_code`` does not fall back to PWP and
+        instead raises a ``ValidationError``.
         """
         rules = getattr(HouseholdValidationConfig, "program_eligibility_rules", None) or {}
         rules = {str(code).upper(): rule for code, rule in rules.items()}
@@ -1343,6 +1340,30 @@ class EligibleHouseholdSelectionService:
                 f"No eligibility rule configured for benefit plan code '{benefit_plan_code}'"
             )
         return matched
+
+    def _resolve_export_columns(self, benefit_plan_code):
+        """Extra Excel export/upload columns for the given Program.
+
+        Resolution follows the configured
+        ``HouseholdValidationConfig.program_specific_export_columns`` mapping:
+            * If ``benefit_plan_code`` is provided, return the columns configured for that
+              Program. Unknown Program codes resolve to ``[]``.
+            * If ``benefit_plan_code`` is falsy (no Program selected), use the ``"PWP"``
+              configuration as the default.
+
+        Deployment overrides replace the entire ``program_specific_export_columns`` mapping
+        rather than being deep-merged with the default configuration. Therefore, if an override
+        omits the ``"PWP"`` key, this method falls back to the built-in default PWP columns
+        instead of returning an empty list. This safeguards against silently generating
+        incomplete Excel exports where all program-specific columns would otherwise be omitted.
+        """
+        columns = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
+        columns = {str(code).upper(): value for code, value in columns.items()}
+        if not benefit_plan_code:
+            resolved = columns.get("PWP") or DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]
+        else:
+            resolved = columns.get(str(benefit_plan_code).upper(), [])
+        return apply_column_option_overrides(resolved)
 
     def _build_household(self, group):
         groupindividuals = [

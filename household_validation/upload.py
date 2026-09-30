@@ -8,17 +8,16 @@ from io import StringIO
 from openpyxl import load_workbook
 
 from household_validation.excel import (
-    BUSINESS_DURATION_COLUMN,
-    BUSINESS_TYPE_COLUMN,
     EXCEL_COLUMNS,
-    HAS_BUSINESS_COLUMN,
     PROJECT_OPTIONS_SHEET,
     PROJECT_OPTIONS_HEADERS,
-    _configured_business_type_options,
 )
 from household_validation.identity import get_household_form_number
 from household_validation.wealth import get_household_wealth_quintile
-from household_validation.verification import PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN
+from household_validation.verification import (
+    PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, YES_VALUES, NO_VALUES,
+)
+from household_validation.apps import HouseholdValidationConfig, apply_column_option_overrides
 
 
 VALIDATION_LIST_SHEET = "Validation List"
@@ -26,15 +25,6 @@ PROJECT_SELECTION_TYPE_INTENT = "INTENT"
 VALIDATION_STATUS_VERIFIED = "VERIFIED"
 VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
 
-EDITABLE_UPLOAD_COLUMNS = {
-    "national_id",
-    "primary_worker",
-    "project",
-    "validation_notes",
-    HAS_BUSINESS_COLUMN,
-    BUSINESS_TYPE_COLUMN,
-    BUSINESS_DURATION_COLUMN,
-}
 OPTIONAL_UPLOAD_COLUMNS = {
     PARTICIPANT_STATUS_COLUMN,
     HOUSEHOLD_STATUS_COLUMN,
@@ -43,19 +33,23 @@ OPTIONAL_UPLOAD_COLUMNS = {
     "marital_status",
     "disability",
     "pmt_score",
-    HAS_BUSINESS_COLUMN,
-    BUSINESS_TYPE_COLUMN,
-    BUSINESS_DURATION_COLUMN,
 }
 REQUIRED_UPLOAD_COLUMNS = tuple(
     column for column in EXCEL_COLUMNS if column not in OPTIONAL_UPLOAD_COLUMNS
 )
-STRUCTURAL_UPLOAD_COLUMNS = tuple(
-    column for column in EXCEL_COLUMNS if column not in EDITABLE_UPLOAD_COLUMNS
-)
 
-YES_VALUES = {"YES", "Y", "TRUE", "1"}
-NO_VALUES = {"NO", "N", "FALSE", "0"}
+# Header text used by workbooks exported before program_specific_export_columns
+# existed, mapped to the semantic key of whichever configured column now
+# covers that field (so old exports keep parsing correctly).
+LEGACY_COLUMN_ALIASES = {
+    "business experience": "has_business",
+    "has business": "has_business",
+    "does member have a business": "has_business",
+    "does member has a business": "has_business",
+    "type of business": "business_type",
+    "business type": "business_type",
+    "business period": "business_duration",
+}
 
 
 @dataclass(frozen=True)
@@ -91,23 +85,68 @@ class WorkbookParseResult:
         )
 
 
-def parse_validation_workbook(file_or_bytes):
-    from household_validation.apps import HouseholdValidationConfig
+def _merge_columns(first, second):
+    """Merge two program's column definitions that share a `key`.
 
-    business_columns_enabled = HouseholdValidationConfig.business_columns_enabled
+    Different programs can define the same column `key` (and `column_name`
+    header) with different `options`/bounds/`required. Upload has no reliable way to
+    know which program a given workbook came from, so it validates
+    permissively against the union of every program that defines this key,
+    rather than picking one arbitrarily (which would silently reject valid
+    values from whichever program lost the merge).
+    """
+    merged = dict(first)
+    if first.get("type") == "select" and second.get("type") == "select":
+        seen = {str(option).casefold() for option in first.get("options") or []}
+        merged_options = list(first.get("options") or [])
+        for option in second.get("options") or []:
+            if str(option).casefold() not in seen:
+                seen.add(str(option).casefold())
+                merged_options.append(option)
+        merged["options"] = merged_options
+    if first.get("type") == "number" and second.get("type") == "number":
+        first_min, second_min = first.get("min"), second.get("min")
+        if first_min is not None and second_min is not None:
+            merged["min"] = min(first_min, second_min)
+        else:
+            merged["min"] = None
+        first_max, second_max = first.get("max"), second.get("max")
+        if first_max is not None and second_max is not None:
+            merged["max"] = max(first_max, second_max)
+        else:
+            merged["max"] = None
+    # A value valid for either program's (possibly looser) rule should pass,
+    # so only keep "required" when every definition that shares this key
+    # agrees it's required.
+    merged["required"] = bool(first.get("required")) and bool(second.get("required"))
+    return merged
+
+
+def _column_registry():
+    programs = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
+    registry = {}
+    for columns in programs.values():
+        for col in columns:
+            existing = registry.get(col["key"])
+            registry[col["key"]] = _merge_columns(existing, col) if existing else col
+    overridden = apply_column_option_overrides(list(registry.values()))
+    return {col["key"]: col for col in overridden}
+
+
+def parse_validation_workbook(file_or_bytes):
     workbook = load_workbook(_to_bytes_io(file_or_bytes), data_only=True)
     errors = []
     if VALIDATION_LIST_SHEET not in workbook.sheetnames:
         return WorkbookParseResult(errors=[f"Missing worksheet: {VALIDATION_LIST_SHEET}"])
 
+    column_registry = _column_registry()
+    extra_columns = {col["key"]: col["column_name"] for col in column_registry.values()}
     worksheet = workbook[VALIDATION_LIST_SHEET]
     try:
-        headers = _read_headers(worksheet)
+        headers = _read_headers(worksheet, extra_columns)
     except ValueError as exc:
         return WorkbookParseResult(errors=[str(exc)])
-    missing_columns = [
-        column for column in REQUIRED_UPLOAD_COLUMNS if column not in headers
-    ]
+    missing_columns = [column for column in REQUIRED_UPLOAD_COLUMNS if column not in headers]
     if missing_columns:
         return WorkbookParseResult(
             errors=[f"Missing required columns: {', '.join(missing_columns)}"]
@@ -118,6 +157,7 @@ def parse_validation_workbook(file_or_bytes):
     error_row_numbers = set()
     invalid_group_keys = set()
     total_rows_read = 0
+    all_columns = [*EXCEL_COLUMNS, *extra_columns.values()]
     for row_number in range(2, worksheet.max_row + 1):
         values = {
             column: (
@@ -127,23 +167,15 @@ def parse_validation_workbook(file_or_bytes):
                 if column in headers
                 else None
             )
-            for column in EXCEL_COLUMNS
+            for column in all_columns
         }
         if _is_blank_row(values):
             continue
         total_rows_read += 1
         row_errors = _validate_structural_values(row_number, values)
-        business_updates, business_errors = _parse_business_values(row_number, values)
-        row_errors.extend(business_errors)
+        business_updates, extra_errors = _parse_extra_columns(row_number, values, column_registry)
+        row_errors.extend(extra_errors)
         primary_worker = _parse_yes_no(values.get("primary_worker"))
-        if business_columns_enabled and primary_worker is not True and any(
-            _clean(values.get(column)) is not None
-            for column in (HAS_BUSINESS_COLUMN, BUSINESS_TYPE_COLUMN, BUSINESS_DURATION_COLUMN)
-        ):
-            row_errors.append(
-                f"Row {row_number}: business information is only available for the selected "
-                "Primary Worker. Clear all three business fields or select Primary Worker YES."
-            )
         validation_date = _parse_date(values.get("validation_date"))
         project_label = _clean(values.get("project"))
         project_name = _resolve_project_name(project_label, project_options)
@@ -205,19 +237,17 @@ def _to_bytes_io(file_or_bytes):
     return file_or_bytes
 
 
-def _read_headers(worksheet):
+def _read_headers(worksheet, extra_columns):
     def normalize(value):
         return " ".join(value.replace("_", " ").split()).casefold()
 
     canonical = {normalize(column): column for column in EXCEL_COLUMNS}
-    canonical.update({
-        "business experience": HAS_BUSINESS_COLUMN,
-        "has business": HAS_BUSINESS_COLUMN,
-        "does member have a business": HAS_BUSINESS_COLUMN,
-        "type of business": BUSINESS_TYPE_COLUMN,
-        "business type": BUSINESS_TYPE_COLUMN,
-        "business period": BUSINESS_DURATION_COLUMN,
-    })
+    for column_name in extra_columns.values():
+        canonical[normalize(column_name)] = column_name
+    for alias, key in LEGACY_COLUMN_ALIASES.items():
+        column_name = extra_columns.get(key)
+        if column_name:
+            canonical[alias] = column_name
     headers = {}
     for column_number in range(1, worksheet.max_column + 1):
         value = _clean(worksheet.cell(row=1, column=column_number).value)
@@ -229,50 +259,83 @@ def _read_headers(worksheet):
     return headers
 
 
-def _parse_business_values(row_number, values):
+def _dependency_state(col, values, column_registry):
+    """("unanswered"|"applicable"|"not_applicable", dependency column def)
+    for ``col``'s ``depends_on`` (or ``("applicable", None)`` when it has
+    none)."""
+    depends_on = col.get("depends_on")
+    if not depends_on:
+        return "applicable", None
+    dep_col = column_registry.get(depends_on["key"])
+    dep_raw = _clean(values.get(dep_col["column_name"])) if dep_col else None
+    if dep_raw is None:
+        return "unanswered", dep_col
+    if dep_raw.casefold() == str(depends_on["equals"]).casefold():
+        return "applicable", dep_col
+    return "not_applicable", dep_col
+
+
+def _parse_extra_columns(row_number, values, column_registry):
+    """Generic parser for household_validation.apps's
+    ``program_specific_export_columns`` column definitions: validates each
+    configured column's cell against its ``type``/``options``/``min``/``max``
+    and ``required``/``depends_on`` rules, producing the ``Individual.json_ext``
+    updates for valid rows (see ``UploadedValidationRow.business_updates``).
+    """
     updates = {}
     errors = []
-    has_business = _clean(values.get(HAS_BUSINESS_COLUMN))
-    business_type = _clean(values.get(BUSINESS_TYPE_COLUMN))
-    period = _clean(values.get(BUSINESS_DURATION_COLUMN))
-    if has_business:
-        flag = _parse_yes_no(has_business)
-        if flag is None:
-            errors.append(f"Row {row_number}: {HAS_BUSINESS_COLUMN} must be YES or NO")
+    for col in column_registry.values():
+        raw_value = _clean(values.get(col["column_name"]))
+        target_key = col["target_individual_json_ext_key"]
+        depends_on = col.get("depends_on")
+        state, dep_col = _dependency_state(col, values, column_registry)
+
+        if state == "unanswered":
+            # The dependency hasn't been answered at all yet -- leave any
+            # previously stored value for this column untouched.
+            continue
+
+        if state == "not_applicable":
+            dep_label = dep_col["column_name"] if dep_col else depends_on["key"]
+            if raw_value is not None:
+                errors.append(
+                    f"Row {row_number}: {col['column_name']} is only available when "
+                    f"{dep_label} is {depends_on['equals']}"
+                )
+                continue
+            # An explicit non-matching answer (e.g. has_business = No) clears
+            # any previously stored value for this column.
+            updates[target_key] = None
+            continue
+
+        if raw_value is None:
+            if col.get("required"):
+                errors.append(f"Row {row_number}: {col['column_name']} is required")
+            continue
+
+        col_type = col.get("type")
+        if col_type == "select":
+            options = {str(option).casefold(): option for option in col.get("options") or []}
+            if raw_value.casefold() not in options:
+                errors.append(f"Row {row_number}: {col['column_name']} is not a valid option")
+                continue
+            updates[target_key] = options[raw_value.casefold()]
+        elif col_type == "number":
+            try:
+                number = Decimal(raw_value)
+                minimum = col.get("min")
+                maximum = col.get("max")
+                if not number.is_finite():
+                    raise ValueError
+                if minimum is not None and number < minimum:
+                    raise ValueError
+                if maximum is not None and number > maximum:
+                    raise ValueError
+                updates[target_key] = float(number)
+            except (InvalidOperation, ValueError):
+                errors.append(f"Row {row_number}: {col['column_name']} must be a valid number")
         else:
-            updates["business_experience"] = "Yes" if flag else "No"
-    if business_type:
-        options = {option.casefold(): option for option in _configured_business_type_options()}
-        if business_type.casefold() not in options:
-            errors.append(f"Row {row_number}: {BUSINESS_TYPE_COLUMN} is not a configured business type")
-        else:
-            updates["type_of_business"] = options[business_type.casefold()]
-    if updates.get("business_experience") == "Yes":
-        if not business_type:
-            errors.append(
-                f"Row {row_number}: {BUSINESS_TYPE_COLUMN} is required when {HAS_BUSINESS_COLUMN} is Yes"
-            )
-        if not period:
-            errors.append(
-                f"Row {row_number}: {BUSINESS_DURATION_COLUMN} is required when {HAS_BUSINESS_COLUMN} is Yes"
-            )
-    if period:
-        try:
-            number = Decimal(period)
-            if not number.is_finite() or not 0 <= number <= 100:
-                raise ValueError
-            updates["business_period"] = float(number)
-        except (InvalidOperation, ValueError):
-            errors.append(f"Row {row_number}: {BUSINESS_DURATION_COLUMN} must be between 0 and 100")
-        if not business_type:
-            errors.append(
-                f"Row {row_number}: select {BUSINESS_TYPE_COLUMN} before entering {BUSINESS_DURATION_COLUMN}"
-            )
-    if updates.get("business_experience") == "No":
-        # Changing Yes to No must also remove previously stored business details.
-        updates.update(type_of_business=None, business_period=None)
-    elif (business_type or period) and updates.get("business_experience") != "Yes":
-        errors.append(f"Row {row_number}: select Yes for {HAS_BUSINESS_COLUMN} before entering business details")
+            updates[target_key] = raw_value
     return updates, errors
 
 
@@ -280,7 +343,7 @@ def _read_project_options(workbook):
     if PROJECT_OPTIONS_SHEET not in workbook.sheetnames:
         return {}
     worksheet = workbook[PROJECT_OPTIONS_SHEET]
-    headers = _read_headers(worksheet)
+    headers = _read_headers(worksheet, {})
     if not all(header in headers for header in PROJECT_OPTIONS_HEADERS[:2]):
         return {}
     options = {}
