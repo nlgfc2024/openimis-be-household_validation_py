@@ -2,6 +2,7 @@ import base64
 
 import graphene
 from django.core.exceptions import PermissionDenied
+from django.db.models import Q
 
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
@@ -31,6 +32,7 @@ from household_validation.services import (
     HouseholdValidationProjectLookupService,
     build_validation_error_report,
 )
+from household_validation.verification import NOT_VERIFIED
 
 VALIDATION_FILTER_ARG_NAMES = {
     "region_id",
@@ -198,8 +200,14 @@ class Query(graphene.ObjectType):
             HouseholdValidationBatchRow.objects.filter(
                 batch_id=kwargs["batch_id"],
                 upload_attempt_id=kwargs["upload_attempt_id"],
-                status=HouseholdValidationBatchRow.Status.REJECTED,
                 is_deleted=False,
+            ).filter(
+                Q(status__in=(
+                    HouseholdValidationBatchRow.Status.REJECTED,
+                    HouseholdValidationBatchRow.Status.ERROR,
+                ))
+                | Q(json_ext__household_status=NOT_VERIFIED)
+                | Q(json_ext__participant_status=NOT_VERIFIED),
             ).order_by("row_number")
         )
         report, _ = build_rejected_households_workbook_bytes(rows)

@@ -315,7 +315,7 @@ class RejectedBatchRowsQueryTest(TestCase):
             "household has more than one primary worker"
         )
         upload_attempt_id = "01a03ab4-c5ac-7b78-a485-f321e7d092f8"
-        filter_mock.return_value.order_by.return_value = [rejected_row]
+        filter_mock.return_value.filter.return_value.order_by.return_value = [rejected_row]
 
         with patch.object(Query, "_check_permissions") as check_permissions_mock:
             result = Query.resolve_household_validation_rejected_batch_rows(
@@ -332,10 +332,10 @@ class RejectedBatchRowsQueryTest(TestCase):
         filter_mock.assert_called_once_with(
             batch_id="01a03aae-4896-7f00-9357-78f69fb8e6ca",
             upload_attempt_id=upload_attempt_id,
-            status=HouseholdValidationBatchRow.Status.REJECTED,
             is_deleted=False,
         )
-        filter_mock.return_value.order_by.assert_called_once_with("row_number")
+        filter_mock.return_value.filter.assert_called_once()
+        filter_mock.return_value.filter.return_value.order_by.assert_called_once_with("row_number")
         self.assertEqual(result.rows, [rejected_row])
         self.assertEqual(result.count, 1)
         self.assertEqual(
@@ -351,7 +351,7 @@ class RejectedBatchRowsQueryTest(TestCase):
 
 
 class RejectedHouseholdsWorkbookTest(TestCase):
-    def test_contains_only_multiple_primary_worker_rejections(self):
+    def test_contains_upload_rows_with_a_validation_issue(self):
         rejection_message = (
             "household has more than one primary worker"
         )
@@ -377,6 +377,13 @@ class RejectedHouseholdsWorkbookTest(TestCase):
                 json_ext={"error_code": "MEMBER_NOT_FOUND"},
                 error_message="Member was not found",
             ),
+            SimpleNamespace(
+                row_number=7,
+                group_id="group-3",
+                raw_row={"form_number": "FORM-003", "member_name": "Not Verified"},
+                json_ext={"household_status": "NOT_VERIFIED"},
+                error_message=None,
+            ),
         ]
 
         report, rejected_row_count = build_rejected_households_workbook_bytes(rows)
@@ -384,13 +391,15 @@ class RejectedHouseholdsWorkbookTest(TestCase):
         worksheet = workbook["Rejected Households"]
         values = list(worksheet.values)
 
-        self.assertEqual(rejected_row_count, 1)
-        self.assertEqual(worksheet.max_row, 2)
+        self.assertEqual(rejected_row_count, 3)
+        self.assertEqual(worksheet.max_row, 4)
         self.assertIn("rejection_reason", values[0])
         self.assertEqual(values[1][0], "FORM-001")
         self.assertEqual(values[1][1], "group-1")
         self.assertEqual(values[1][2], "4, 5")
-        self.assertNotIn("FORM-002", str(values))
+        self.assertIn("FORM-002", str(values))
+        self.assertIn("FORM-003", str(values))
+        self.assertIn("household has no primary worker selected", str(values))
 
 
 def _dob_for_age(age):

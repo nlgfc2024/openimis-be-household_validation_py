@@ -10,7 +10,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from household_validation.identity import get_household_form_number
 from household_validation.verification import (
     PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, BUSINESS_REJECTION_CODE,
-    YES_VALUES, NO_VALUES,
+    NOT_VERIFIED, YES_VALUES, NO_VALUES,
 )
 
 
@@ -104,13 +104,24 @@ def is_primary_worker_rejection(row):
 
 
 def build_rejected_households_workbook_bytes(rows):
-    rejected_rows = [
+    def issue_reason(row):
+        json_ext = row.json_ext or {}
+        if row.error_message:
+            return row.error_message
+        if json_ext.get("household_status") == NOT_VERIFIED:
+            return "household has no primary worker selected"
+        if json_ext.get("participant_status") == NOT_VERIFIED:
+            return "participant primary worker status was not recorded"
+        return None
+
+    issue_rows = [
         row for row in rows
         if is_primary_worker_rejection(row)
         or (row.json_ext or {}).get("error_code") == BUSINESS_REJECTION_CODE
+        or issue_reason(row)
     ]
     households = {}
-    for row in rejected_rows:
+    for row in issue_rows:
         raw_row = row.raw_row or {}
         group_uuid = str(
             getattr(row, "group_id", None)
@@ -127,11 +138,14 @@ def build_rejected_households_workbook_bytes(rows):
                 ),
                 "group_uuid": group_uuid,
                 "row_numbers": set(),
-                "rejection_reason": row.error_message,
+                "rejection_reasons": set(),
             },
         )
         if row.row_number is not None:
             household["row_numbers"].add(row.row_number)
+        reason = issue_reason(row)
+        if reason:
+            household["rejection_reasons"].add(reason)
 
     workbook = Workbook()
     worksheet = workbook.active
@@ -152,7 +166,7 @@ def build_rejected_households_workbook_bytes(rows):
                 str(row_number)
                 for row_number in sorted(household["row_numbers"])
             ),
-            household["rejection_reason"],
+            "; ".join(sorted(household["rejection_reasons"])),
         ]
         worksheet.append(values)
         for cell in worksheet[worksheet.max_row]:
