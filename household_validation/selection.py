@@ -17,6 +17,8 @@ CATEGORY_FEMALE_HEADED = "FEMALE_HEADED"
 CATEGORY_YOUTH = "YOUTH"
 # Every eligible household that is neither female-headed nor youth-headed
 CATEGORY_OTHER = "OTHER"
+YOUTH_MIN_AGE = 18
+YOUTH_MAX_AGE = 35
 
 ROW_TYPE_MAIN = "MAIN"
 ROW_TYPE_RESERVE = "RESERVE"
@@ -171,13 +173,18 @@ def normalize_wealth_rank(value):
 
 
 def categorize_household(household: EligibleHousehold):
-    if household.head and normalize_gender(household.head.gender) == "female":
+    head = household.head
+    if head is None:
+        return CATEGORY_OTHER
+    head_gender = normalize_gender(head.gender)
+    if head_gender == "female":
         return CATEGORY_FEMALE_HEADED
-
-    for member in household.eligible_members:
-        if member.age is not None and 18 <= member.age <= 35:
-            return CATEGORY_YOUTH
-
+    if (
+        head_gender == "male"
+        and head.age is not None
+        and YOUTH_MIN_AGE <= head.age <= YOUTH_MAX_AGE
+    ):
+        return CATEGORY_YOUTH
     return CATEGORY_OTHER
 
 
