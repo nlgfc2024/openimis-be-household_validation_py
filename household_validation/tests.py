@@ -1977,8 +1977,11 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "member_uuid"), "member-1")
         self.assertEqual(self._value(worksheet, "national_id"), "NAT-001")
         self.assertEqual(self._cell(worksheet, "national_id").number_format, "@")
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             self.assertTrue(worksheet.column_dimensions[self._cell(worksheet, column).column_letter].hidden)
+        self.assertFalse(
+            worksheet.column_dimensions[self._cell(worksheet, "row_type").column_letter].hidden,
+        )
         for column in ("participant_status", "household_status"):
             cell = self._cell(worksheet, column)
             self.assertEqual(cell.data_type, "f")
@@ -2230,7 +2233,7 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(worksheet.cell(3, relationship_column).value, "SPOUSE")
         self.assertEqual(worksheet.cell(4, relationship_column).value, "SON")
 
-    def test_export_hides_internal_ids_and_preserves_upload_matching(self):
+    def test_export_hides_internal_ids_shows_row_type_and_preserves_upload_matching(self):
         workbook = ExcelValidationListExporter(
             self._selection_result(member_count=2), batch_id="batch-1",
         ).export_workbook()
@@ -2238,13 +2241,14 @@ class ExcelValidationListExporterTest(TestCase):
         workbook.save(content)
         workbook = load_workbook(BytesIO(content.getvalue()))
         worksheet = workbook[VALIDATION_LIST_SHEET]
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             cell = self._cell(worksheet, column)
             self.assertTrue(worksheet.column_dimensions[cell.column_letter].hidden)
             self.assertTrue(cell.protection.locked)
-        for column in ("District", "form_number", "member_name", "national_id"):
+        for column in ("row_type", "District", "form_number", "member_name", "national_id"):
             cell = self._cell(worksheet, column)
             self.assertFalse(worksheet.column_dimensions[cell.column_letter].hidden)
+        self.assertTrue(self._cell(worksheet, "row_type").protection.locked)
         parsed = parse_validation_workbook(content.getvalue())
         self.assertEqual(parsed.errors, [])
         self.assertEqual(len(parsed.rows), 2)

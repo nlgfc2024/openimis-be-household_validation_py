@@ -240,7 +240,8 @@ class ExcelValidationListExporter:
 
         # Keep identifiers in each row for reliable upload matching and formulas,
         # but omit these internal fields from the field officer's visible sheet.
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        # Row type remains visible so MAIN and RESERVE rows can be distinguished.
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             worksheet.column_dimensions[self._column_letter(column)].hidden = True
         for selection in worksheet.sheet_view.selection:
             selection.activeCell = "E2"
