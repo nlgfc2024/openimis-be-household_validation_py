@@ -69,6 +69,7 @@ EXCEL_COLUMNS = [
 
 PROJECT_OPTIONS_SHEET = "Project Options"
 PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
+PROJECT_UNAVAILABLE_RANGE = f"'{PROJECT_OPTIONS_SHEET}'!$D$2"
 
 EDITABLE_COLUMNS = {
     "national_id",
@@ -301,6 +302,9 @@ class ExcelValidationListExporter:
             worksheet.cell(row=row_number, column=1, value=self._project_id(project))
             worksheet.cell(row=row_number, column=2, value=self._project_name(project))
             worksheet.cell(row=row_number, column=3, value=project_labels[id(project)])
+        # Empty dropdown source used when the row is not the Primary Worker.
+        worksheet.cell(row=1, column=4, value="unavailable")
+        worksheet.cell(row=2, column=4, value='=""')
         worksheet.sheet_state = "hidden"
         return worksheet
 
@@ -472,14 +476,46 @@ class ExcelValidationListExporter:
 
         project_count = len([project for project in self.projects if self._project_name(project)])
         if project_count:
-            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
+            project_options_range = (
+                f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
+            )
+            primary_worker_is_yes = (
+                f'UPPER(TRIM(${primary_worker_col}2&""))="YES"'
+            )
+            project_formula = (
+                f'INDIRECT(IF({primary_worker_is_yes},'
+                f'"{project_options_range}","{PROJECT_UNAVAILABLE_RANGE}"))'
+            )
             project_validation = DataValidation(
                 type="list",
                 formula1=project_formula,
                 allow_blank=True,
+                showDropDown=False,
+                showInputMessage=True,
+                promptTitle="Select Primary Worker first",
+                prompt=(
+                    "Set Primary Worker to YES on this row before selecting "
+                    "a project."
+                ),
+                showErrorMessage=True,
+                errorStyle="stop",
+                errorTitle="Project not available",
+                error="Only the household's Primary Worker can be assigned a project.",
             )
             worksheet.add_data_validation(project_validation)
             project_validation.add(f"{project_col}2:{project_col}{max_row}")
+            worksheet.conditional_formatting.add(
+                f"{project_col}2:{project_col}{max_row}",
+                FormulaRule(
+                    formula=[
+                        f'AND(NOT({primary_worker_is_yes}),'
+                        f'LEN(TRIM(${project_col}2&""))>0)'
+                    ],
+                    fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
+                    font=Font(color="FF9C0006"),
+                    stopIfTrue=True,
+                ),
+            )
 
         for col in self.additional_columns:
             self._apply_extra_column_validation(worksheet, col, max_row)

@@ -194,6 +194,10 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(f"Row {row_number}: validation_date is invalid")
         if project_label and not project_id:
             row_errors.append(f"Row {row_number}: project is not in the project options")
+        if project_label and primary_worker is not True:
+            row_errors.append(
+                f"Row {row_number}: project can only be selected for the Primary Worker"
+            )
         if row_errors:
             errors.extend(row_errors)
             error_row_numbers.add(row_number)
