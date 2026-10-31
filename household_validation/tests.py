@@ -1918,13 +1918,40 @@ class ValidationUploadParserTest(TestCase):
         project_options.cell(row=2, column=3, value="Road Works (project-1)")
         project_options.append(["project-2", "Road Works", "Road Works (project-2)"])
         project_column = EXCEL_COLUMNS.index("project") + 1
+        primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
         worksheet.cell(row=2, column=project_column, value="Road Works (project-2)")
+        worksheet.cell(row=2, column=primary_worker_column, value="YES")
 
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
         self.assertEqual(parsed.errors, [])
         self.assertEqual(parsed.rows[0].project_id, "project-2")
         self.assertEqual(parsed.rows[0].project_name, "Road Works")
+
+    def test_parse_validation_workbook_rejects_project_for_non_primary_worker(self):
+        for primary_worker in (None, "NO"):
+            with self.subTest(primary_worker=primary_worker):
+                workbook = self._upload_workbook()
+                worksheet = workbook[VALIDATION_LIST_SHEET]
+                worksheet.cell(
+                    row=2,
+                    column=EXCEL_COLUMNS.index("project") + 1,
+                    value="Road Works",
+                )
+                worksheet.cell(
+                    row=2,
+                    column=EXCEL_COLUMNS.index("primary_worker") + 1,
+                    value=primary_worker,
+                )
+
+                parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+                self.assertEqual(parsed.rows, [])
+                self.assertIn(
+                    "Row 2: project can only be selected for the Primary Worker",
+                    parsed.errors,
+                )
+                self.assertEqual(parsed.invalid_group_keys, frozenset({"group-1"}))
 
     def _upload_workbook(self, extra_columns=PWP_EXPORT_COLUMNS):
         columns = _all_columns(extra_columns)
@@ -1977,8 +2004,11 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(self._value(worksheet, "member_uuid"), "member-1")
         self.assertEqual(self._value(worksheet, "national_id"), "NAT-001")
         self.assertEqual(self._cell(worksheet, "national_id").number_format, "@")
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             self.assertTrue(worksheet.column_dimensions[self._cell(worksheet, column).column_letter].hidden)
+        self.assertFalse(
+            worksheet.column_dimensions[self._cell(worksheet, "row_type").column_letter].hidden,
+        )
         for column in ("participant_status", "household_status"):
             cell = self._cell(worksheet, column)
             self.assertEqual(cell.data_type, "f")
@@ -1997,9 +2027,14 @@ class ExcelValidationListExporterTest(TestCase):
         # Only the primary-worker and project dropdowns exist; no extra columns.
         rules = worksheet.data_validations.dataValidation
         self.assertEqual(len(rules), 2)
-        self.assertEqual(len(worksheet.conditional_formatting), 1)
+        self.assertEqual(len(worksheet.conditional_formatting), 2)
         self.assertTrue(any("HouseholdPrimaryWorkerAnswers" in rule.formula1 for rule in rules))
-        self.assertTrue(any(rule.formula1 == "'Project Options'!$C$2:$C$2" for rule in rules))
+        self.assertTrue(any(
+            "'Project Options'!$C$2:$C$2" in rule.formula1
+            and "'Project Options'!$D$2" in rule.formula1
+            and "INDIRECT(IF(" in rule.formula1
+            for rule in rules
+        ))
         self.assertEqual(set(workbook.defined_names), {PRIMARY_WORKER_ANSWERS_RANGE, PRIMARY_WORKER_NO_RANGE})
         for name, reference in (
             (PRIMARY_WORKER_ANSWERS_RANGE, "$E$2:$E$3"),
@@ -2230,7 +2265,7 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(worksheet.cell(3, relationship_column).value, "SPOUSE")
         self.assertEqual(worksheet.cell(4, relationship_column).value, "SON")
 
-    def test_export_hides_internal_ids_and_preserves_upload_matching(self):
+    def test_export_hides_internal_ids_shows_row_type_and_preserves_upload_matching(self):
         workbook = ExcelValidationListExporter(
             self._selection_result(member_count=2), batch_id="batch-1",
         ).export_workbook()
@@ -2238,13 +2273,14 @@ class ExcelValidationListExporterTest(TestCase):
         workbook.save(content)
         workbook = load_workbook(BytesIO(content.getvalue()))
         worksheet = workbook[VALIDATION_LIST_SHEET]
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             cell = self._cell(worksheet, column)
             self.assertTrue(worksheet.column_dimensions[cell.column_letter].hidden)
             self.assertTrue(cell.protection.locked)
-        for column in ("District", "form_number", "member_name", "national_id"):
+        for column in ("row_type", "District", "form_number", "member_name", "national_id"):
             cell = self._cell(worksheet, column)
             self.assertFalse(worksheet.column_dimensions[cell.column_letter].hidden)
+        self.assertTrue(self._cell(worksheet, "row_type").protection.locked)
         parsed = parse_validation_workbook(content.getvalue())
         self.assertEqual(parsed.errors, [])
         self.assertEqual(len(parsed.rows), 2)
@@ -2272,9 +2308,29 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertEqual(project_options["A2"].value, "project-1")
         self.assertEqual(project_options["B2"].value, "Road Works, Phase 1")
         self.assertEqual(project_options["C2"].value, "Road Works, Phase 1")
-        formulas = {validation.formula1 for validation in worksheet.data_validations.dataValidation}
-        self.assertTrue(any("HouseholdPrimaryWorkerAnswers" in formula for formula in formulas))
-        self.assertIn("'Project Options'!$C$2:$C$2", formulas)
+        self.assertEqual(project_options["D2"].value, '=""')
+        validations = worksheet.data_validations.dataValidation
+        self.assertTrue(any(
+            "HouseholdPrimaryWorkerAnswers" in validation.formula1
+            for validation in validations
+        ))
+        project_column = self._cell(worksheet, "project").column_letter
+        primary_worker_column = self._cell(
+            worksheet, "primary_worker",
+        ).column_letter
+        project_validation = next(
+            validation for validation in validations
+            if f"{project_column}2" in validation.sqref
+        )
+        self.assertEqual(
+            project_validation.formula1,
+            f'INDIRECT(IF(UPPER(TRIM(${primary_worker_column}2&""))="YES",'
+            '"\'Project Options\'!$C$2:$C$2",'
+            '"\'Project Options\'!$D$2"))',
+        )
+        self.assertTrue(project_validation.showErrorMessage)
+        self.assertEqual(project_validation.errorStyle, "stop")
+        self.assertTrue(project_validation.showInputMessage)
 
     def test_primary_worker_dropdown_prevents_second_yes_per_household(self):
         from household_validation.excel import (
@@ -2755,6 +2811,48 @@ class UploadHardeningTest(TestCase):
             rejections = service._primary_worker_rejections(rows)
 
         self.assertEqual(rejections, {})
+
+    def test_project_is_rejected_for_non_primary_worker(self):
+        row = replace(
+            self._uploaded_row(2, "member-1", False),
+            project_name="Road Works",
+            project_id="project-1",
+        )
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=MagicMock()),
+            patch.object(service, "_group_individual", return_value=MagicMock()),
+            patch.object(service, "_project", return_value=MagicMock()),
+            patch.object(service, "_structural_errors", return_value=[]),
+        ):
+            errors, *_ = service._resolve_row(row)
+
+        self.assertIn(
+            "Row 2: project can only be selected for the Primary Worker",
+            errors,
+        )
+
+    def test_project_cannot_be_assigned_to_multiple_household_members(self):
+        group = self._group_with_primary_workers(False, False)
+        rows = [
+            replace(
+                self._uploaded_row(row_number, member_uuid, True),
+                project_name="Road Works",
+                project_id="project-1",
+            )
+            for row_number, member_uuid in ((2, "member-1"), (3, "member-2"))
+        ]
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_group", return_value=group),
+            patch.object(service, "_structural_errors", return_value=[]),
+            patch.object(service, "_project", return_value=MagicMock()),
+        ):
+            rejections = service._primary_worker_rejections(rows)
+
+        self.assertEqual(rejections["group-1"]["row_numbers"], {2, 3})
 
     def test_primary_worker_preflight_accepts_explicit_worker_transfer(self):
         group = self._group_with_primary_workers(True, False)

@@ -494,6 +494,11 @@ class HouseholdValidationUploadService:
             errors.append(f"Row {uploaded_row.row_number}: member was not found in group")
         if uploaded_row.project_id and project is None:
             errors.append(f"Row {uploaded_row.row_number}: project was not found")
+        if uploaded_row.project_id and uploaded_row.primary_worker is not True:
+            errors.append(
+                f"Row {uploaded_row.row_number}: project can only be selected "
+                "for the Primary Worker"
+            )
 
         return errors, group, group_individual, project
 
