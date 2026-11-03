@@ -589,11 +589,17 @@ Recommended workflow:
 | No Primary Worker selected | NOT_VERIFIED |
 | Multiple Primary Workers selected | REJECTED |
 
+Each household can have only one Primary Worker. A Project can be selected only
+on that Primary Worker's row; Project cells on other rows have an empty dropdown,
+and stale selections are highlighted for correction.
+
 ---
 
 ### Workbook Integrity Rules
 
 - Hidden identifier columns must not be removed.
+- The visible `Row Type` column identifies `MAIN` and `RESERVE` rows and is locked
+  against editing.
 - Protected fields must not be modified.
 - Duplicate headers are rejected.
 - Upload recalculates verification status.
@@ -619,6 +625,10 @@ The upload process:
 4. Applies updates.
 5. Records batch outcomes.
 6. Generates error reports when required.
+
+If any row in a household has invalid upload data, including a Project assigned
+to someone other than its Primary Worker, the household is rejected rather than
+partially applied.
 
 Primary Worker updates are applied atomically for verified households.
 
