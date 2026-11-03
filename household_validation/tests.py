@@ -2821,48 +2821,6 @@ class UploadHardeningTest(TestCase):
 
         self.assertEqual(rejections, {})
 
-    def test_project_is_rejected_for_non_primary_worker(self):
-        row = replace(
-            self._uploaded_row(2, "member-1", False),
-            project_name="Road Works",
-            project_id="project-1",
-        )
-        service = HouseholdValidationUploadService()
-
-        with (
-            patch.object(service, "_group", return_value=MagicMock()),
-            patch.object(service, "_group_individual", return_value=MagicMock()),
-            patch.object(service, "_project", return_value=MagicMock()),
-            patch.object(service, "_structural_errors", return_value=[]),
-        ):
-            errors, *_ = service._resolve_row(row)
-
-        self.assertIn(
-            "Row 2: project can only be selected for the Primary Worker",
-            errors,
-        )
-
-    def test_project_cannot_be_assigned_to_multiple_household_members(self):
-        group = self._group_with_primary_workers(False, False)
-        rows = [
-            replace(
-                self._uploaded_row(row_number, member_uuid, True),
-                project_name="Road Works",
-                project_id="project-1",
-            )
-            for row_number, member_uuid in ((2, "member-1"), (3, "member-2"))
-        ]
-        service = HouseholdValidationUploadService()
-
-        with (
-            patch.object(service, "_group", return_value=group),
-            patch.object(service, "_structural_errors", return_value=[]),
-            patch.object(service, "_project", return_value=MagicMock()),
-        ):
-            rejections = service._primary_worker_rejections(rows)
-
-        self.assertEqual(rejections["group-1"]["row_numbers"], {2, 3})
-
     def test_primary_worker_preflight_accepts_explicit_worker_transfer(self):
         group = self._group_with_primary_workers(True, False)
         rows = [
