@@ -69,6 +69,7 @@ EXCEL_COLUMNS = [
 
 PROJECT_OPTIONS_SHEET = "Project Options"
 PROJECT_OPTIONS_HEADERS = ["project_id", "project", "project_label"]
+EMPTY_DROPDOWN_RANGE = f"'{PROJECT_OPTIONS_SHEET}'!$D$2"
 
 EDITABLE_COLUMNS = {
     "national_id",
@@ -210,7 +211,6 @@ class ExcelValidationListExporter:
             col["column_name"] for col in self.additional_columns
         }
         self._select_ranges = {}
-        self._extra_unavailable_range = None
         self._micro_catchment_cache = {}
         self._hotspot_cache = {}
 
@@ -240,7 +240,8 @@ class ExcelValidationListExporter:
 
         # Keep identifiers in each row for reliable upload matching and formulas,
         # but omit these internal fields from the field officer's visible sheet.
-        for column in ("batch_id", "group_uuid", "member_uuid", "row_type", "project_id"):
+        # Row type remains visible so MAIN and RESERVE rows can be distinguished.
+        for column in ("batch_id", "group_uuid", "member_uuid", "project_id"):
             worksheet.column_dimensions[self._column_letter(column)].hidden = True
         for selection in worksheet.sheet_view.selection:
             selection.activeCell = "E2"
@@ -300,6 +301,12 @@ class ExcelValidationListExporter:
             worksheet.cell(row=row_number, column=1, value=self._project_id(project))
             worksheet.cell(row=row_number, column=2, value=self._project_name(project))
             worksheet.cell(row=row_number, column=3, value=project_labels[id(project)])
+        # Shared empty source for every dropdown whose dependency is not met.
+        # This lives on the always-present Project Options sheet so it is also
+        # available when the program has no select-type extra columns. An
+        # explicit empty string prevents LibreOffice Calc from showing 0.
+        worksheet.cell(row=1, column=4, value="unavailable")
+        worksheet.cell(row=2, column=4, value='=""')
         worksheet.sheet_state = "hidden"
         return worksheet
 
@@ -360,16 +367,8 @@ class ExcelValidationListExporter:
             self._select_ranges[col["key"]] = (
                 f"'{EXTRA_COLUMN_OPTIONS_SHEET}'!${letter}$2:${letter}${len(options) + 1}"
             )
-        # A shared blank source for a gated dropdown whose dependency isn't met.
-        # Calc displays a genuinely empty list-source cell as numeric 0, so an
-        # explicit empty string keeps the unavailable dropdown blank.
-        unavailable_index = len(select_columns) + 1
-        unavailable_letter = get_column_letter(unavailable_index)
-        worksheet.cell(row=1, column=unavailable_index, value="unavailable")
-        worksheet.cell(row=2, column=unavailable_index, value='=""')
-        self._extra_unavailable_range = f"'{EXTRA_COLUMN_OPTIONS_SHEET}'!${unavailable_letter}$2"
         worksheet.sheet_state = "hidden"
-        return worksheet, unavailable_index + 1
+        return worksheet, len(select_columns) + 1
 
     def _write_primary_worker_options(self, worksheet, column_index):
         letter = get_column_letter(column_index)
@@ -471,14 +470,30 @@ class ExcelValidationListExporter:
 
         project_count = len([project for project in self.projects if self._project_name(project)])
         if project_count:
-            project_formula = f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
-            project_validation = DataValidation(
-                type="list",
-                formula1=project_formula,
-                allow_blank=True,
+            project_options_range = (
+                f"'{PROJECT_OPTIONS_SHEET}'!$C$2:$C${project_count + 1}"
             )
-            worksheet.add_data_validation(project_validation)
-            project_validation.add(f"{project_col}2:{project_col}{max_row}")
+            primary_worker_is_yes = (
+                f'UPPER(TRIM(${primary_worker_col}2&""))="YES"'
+            )
+            self._apply_conditional_dropdown_validation(
+                worksheet=worksheet,
+                column_letter=project_col,
+                max_row=max_row,
+                options_range=project_options_range,
+                dependency_formula=primary_worker_is_yes,
+                allow_blank=True,
+                prompt_title="Select Primary Worker first",
+                prompt=(
+                    "Set Primary Worker to YES on this row before selecting "
+                    "a project."
+                ),
+                error_title="Project not available",
+                error=(
+                    "Select a project from the list. Only the household's "
+                    "Primary Worker can be assigned a project."
+                ),
+            )
 
         for col in self.additional_columns:
             self._apply_extra_column_validation(worksheet, col, max_row)
@@ -488,6 +503,63 @@ class ExcelValidationListExporter:
         dep_letter = self._column_letter(dep_column)
         equals = str(depends_on["equals"]).upper()
         return f'UPPER(TRIM(${dep_letter}2&""))="{equals}"'
+
+    def _apply_conditional_dropdown_validation(
+        self,
+        worksheet,
+        column_letter,
+        max_row,
+        options_range,
+        dependency_formula,
+        allow_blank,
+        prompt_title,
+        prompt,
+        error_title,
+        error,
+    ):
+        target = f"{column_letter}2:{column_letter}{max_row}"
+        validation = DataValidation(
+            type="list",
+            formula1=(
+                f'INDIRECT(IF({dependency_formula},'
+                f'"{options_range}","{EMPTY_DROPDOWN_RANGE}"))'
+            ),
+            allow_blank=allow_blank,
+            showDropDown=False,
+            showInputMessage=True,
+            promptTitle=prompt_title,
+            prompt=prompt,
+            showErrorMessage=True,
+            errorStyle="stop",
+            errorTitle=error_title,
+            error=error,
+        )
+        worksheet.add_data_validation(validation)
+        validation.add(target)
+        self._apply_dependency_highlight(
+            worksheet,
+            target=target,
+            column_letter=column_letter,
+            dependency_formula=dependency_formula,
+        )
+
+    @staticmethod
+    def _apply_dependency_highlight(
+        worksheet,
+        target,
+        column_letter,
+        dependency_formula,
+    ):
+        # Highlight stale answers after the dependency changes; never erase
+        # them silently.
+        worksheet.conditional_formatting.add(target, FormulaRule(
+            formula=[
+                f'AND(NOT({dependency_formula}),'
+                f'LEN(TRIM(${column_letter}2&""))>0)'
+            ],
+            fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
+            font=Font(color="FF9C0006"), stopIfTrue=True,
+        ))
 
     def _apply_extra_column_validation(self, worksheet, col, max_row):
         column_letter = self._column_letter(col["column_name"])
@@ -507,9 +579,21 @@ class ExcelValidationListExporter:
 
         validation = None
         if col_type == "select":
-            options_range = self._select_ranges.get(col["key"], self._extra_unavailable_range)
+            options_range = self._select_ranges.get(col["key"], EMPTY_DROPDOWN_RANGE)
             if dep_met:
-                formula1 = f'INDIRECT(IF({dep_met},"{options_range}","{self._extra_unavailable_range}"))'
+                self._apply_conditional_dropdown_validation(
+                    worksheet=worksheet,
+                    column_letter=column_letter,
+                    max_row=max_row,
+                    options_range=options_range,
+                    dependency_formula=dep_met,
+                    allow_blank=not required,
+                    prompt_title=prompt_title,
+                    prompt=prompt,
+                    error_title=f"{col['column_name']} not applicable",
+                    error=f"Select a valid option for {col['column_name']}.",
+                )
+                return
             else:
                 formula1 = options_range
             validation = DataValidation(
@@ -558,13 +642,12 @@ class ExcelValidationListExporter:
             validation.add(target)
 
         if dep_met:
-            # Highlight stale answers after the dependency changes; never
-            # silently erase them.
-            worksheet.conditional_formatting.add(target, FormulaRule(
-                formula=[f'AND(NOT({dep_met}),LEN(TRIM(${column_letter}2&""))>0)'],
-                fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
-                font=Font(color="FF9C0006"), stopIfTrue=True,
-            ))
+            self._apply_dependency_highlight(
+                worksheet,
+                target=target,
+                column_letter=column_letter,
+                dependency_formula=dep_met,
+            )
 
     def _apply_protection(self, worksheet):
         worksheet.protection.sheet = True
