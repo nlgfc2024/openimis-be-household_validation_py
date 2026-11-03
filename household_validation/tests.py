@@ -38,6 +38,7 @@ from household_validation.apps import (
     HouseholdValidationConfig,
 )
 from household_validation.excel import (
+    EMPTY_DROPDOWN_RANGE,
     EXCEL_COLUMNS,
     EXTRA_COLUMN_OPTIONS_SHEET,
     EXTRA_COLUMNS_INSERT_AFTER,
@@ -2331,6 +2332,11 @@ class ExcelValidationListExporterTest(TestCase):
         self.assertTrue(project_validation.showErrorMessage)
         self.assertEqual(project_validation.errorStyle, "stop")
         self.assertTrue(project_validation.showInputMessage)
+        self.assertEqual(
+            project_validation.error,
+            "Select a project from the list. Only the household's Primary "
+            "Worker can be assigned a project.",
+        )
 
     def test_primary_worker_dropdown_prevents_second_yes_per_household(self):
         from household_validation.excel import (
@@ -2417,6 +2423,7 @@ class ExcelValidationListExporterTest(TestCase):
             f"'{EXTRA_COLUMN_OPTIONS_SHEET}'!$B$2:$B${business_type_option_count + 1}",
             validation.formula1,
         )
+        self.assertIn(f'"{EMPTY_DROPDOWN_RANGE}"', validation.formula1)
         self.assertLessEqual(len(validation.formula1), 255)
         self.assertTrue(validation.showInputMessage)
         self.assertEqual(validation.promptTitle, f"Select {HAS_BUSINESS_COLUMN} first")
@@ -2427,6 +2434,8 @@ class ExcelValidationListExporterTest(TestCase):
         options = workbook[EXTRA_COLUMN_OPTIONS_SHEET]
         self.assertEqual(options.sheet_state, "hidden")
         self.assertEqual(options["B2"].value, "Crop farming")
+        self.assertEqual(options["C1"].value, "Primary Worker answers")
+        self.assertEqual(workbook[PROJECT_OPTIONS_SHEET]["D2"].value, '=""')
 
     def test_business_period_has_required_prompt_and_missing_value_highlight(self):
         workbook = ExcelValidationListExporter(
