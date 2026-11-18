@@ -25,7 +25,7 @@ The module enables:
 - [Selection Logic](#selection-logic)
 - [Program-Based Selection](#program-based-selection)
 - [Configuration](#configuration)
-- [UMEP Individual Selection](docs/umep-individual-validation.md)
+- [UMEP Individual Validation](#umep-individual-validation)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -369,6 +369,61 @@ The module logs warnings when retired configuration keys are detected.
 
 ---
 
+## UMEP Individual Validation
+
+Add `"UMEP": {"subject": "INDIVIDUAL", "data_source": "ubr"}` to the
+existing `program_eligibility_rules`. Omitted subjects remain `HOUSEHOLD`; other
+subject values are rejected. Individual rules accept `subject` and an optional
+non-empty `data_source` only. Set the source to the UMEP Phase's
+`json_ext.data_source`; when omitted, both validation and enrolment default to
+`ubr`, including legacy missing, null and empty source tags. Other source keys
+match exactly. Candidates are accessible, non-deleted individuals outside active
+households, filtered through `Individual.location` and ordered by primary key.
+Targets count people.
+
+Deployment configuration is maintained in
+[nlgfc2024/coremis-configs](https://github.com/nlgfc2024/coremis-configs/blob/main/household_validation/umep.household_validation.config.json).
+Its per-instance file contains the complete UMEP rules, programme-specific columns
+and option overrides. Saved top-level blocks **replace** defaults, without deep
+merge. Use the instance file as a whole; retain other programme entries explicitly
+if configuring a shared deployment. The default module configuration remains
+household-only. Configuration rules are validated on save through the core module
+configuration registry and again at startup.
+
+The individual decision contract is **VERIFIED / NOT_VERIFIED only**. Leading and
+trailing whitespace is trimmed and case normalised. Blank/null decisions skip the
+whole row without changes; unsupported values, including REJECTED and Yes/No, are
+invalid. Submitted decisions must satisfy applicable configured required fields,
+dependencies, types, options and numeric bounds before row updates. Household
+Primary Worker/status rules are unchanged.
+
+The read-only queries below reuse right `958001`. They expose programme metadata
+and current candidates; candidate results are not a saved workbook list.
+
+```graphql
+query {
+  validationProgrammes {
+    benefitPlanCode subject dataSource columns decisionValues blankDecisionBehavior
+  }
+  individualValidationCandidates(
+    benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
+    targetCount: 100, first: 20, offset: 0
+  ) {
+    eligibleIndividuals selectedIndividuals hasNextPage
+    items { id firstName lastName dob locationId }
+  }
+}
+```
+
+`benefitPlanCode` is required for individual candidates. `first` defaults to 20
+and accepts 0–100; `offset` is non-negative. Geographic filters use each person's
+own location, with no household fallback. `targetCount: 0` selects none; omitting
+the target selects all eligible candidates before pagination. Programme discovery
+exposes configured entries only. Existing household queries and mutations retain
+their household behavior.
+
+---
+
 ## Program-Specific Export Columns
 
 Additional Excel columns can be configured per program using:
@@ -649,14 +704,3 @@ cd openimis-be_py/openIMIS
 PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" \
 ../.venv/bin/python manage.py test household_validation --keepdb
 ```
-
-### Latest Result
-
-```text
-Found 161 tests.
-Ran 161 tests in 0.7s
-
-OK
-```
-
-✅ All 161 tests pass.

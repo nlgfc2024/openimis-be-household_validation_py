@@ -1,8 +1,6 @@
 """Configuration and database-backed UMEP candidate contract tests."""
-import json
 from copy import deepcopy
 from datetime import date
-from pathlib import Path
 from types import SimpleNamespace
 from unittest import TestCase
 from unittest.mock import patch
@@ -12,7 +10,8 @@ import graphene
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.test import TestCase as DjangoTestCase
 
-from core.models import User
+from core.models import ModuleConfiguration, User
+from individual.data_source import benefit_plan_data_source
 from individual.models import Group, GroupIndividual, Individual
 from location.models import Location
 
@@ -65,19 +64,47 @@ class ProgrammeSubjectTests(TestCase):
         with self.assertRaises(ValidationError):
             programme_rules({"UMEP": {"subject": "INDIVIDUAL", "selection_strategy": {}}})
 
+    def test_individual_source_must_be_a_nonempty_string(self):
+        for source in (None, "", "  ", True, 1, [], {}):
+            with self.subTest(source=source), self.assertRaises(ValidationError):
+                programme_rules({"UMEP": {"subject": "INDIVIDUAL", "data_source": source}})
+
+    def test_ready_registers_save_time_validator(self):
+        from django.apps import apps
+
+        app = apps.get_app_config("household_validation")
+        with patch("core.models.ModuleConfiguration.get_or_default", return_value={
+            "program_eligibility_rules": RULES,
+        }), \
+                patch("household_validation.apps.register_validator") as register:
+            app.ready()
+        register.assert_called_once_with("household_validation", app._validate_module_config)
+
+    def test_save_time_validator_rejects_nonobject_configuration(self):
+        from django.apps import apps
+
+        app = apps.get_app_config("household_validation")
+        with self.assertRaises(ValidationError) as exc:
+            app._validate_module_config(SimpleNamespace(_cfg=[]))
+        self.assertIn("config", exc.exception.message_dict)
+
     def test_subject_dispatch_and_household_guard(self):
         self.assertIsInstance(selection_service("UMEP", None), EligibleIndividualSelectionService)
         self.assertIsInstance(selection_service("PWP", None), EligibleHouseholdSelectionService)
         with self.assertRaises(ValidationError):
             EligibleHouseholdSelectionService()._resolve_eligibility_rule("UMEP")
 
-    def test_example_columns_and_overrides_are_resolved_without_mutating_config(self):
-        path = Path(__file__).resolve().parents[1] / "examples" / "umep.config.json"
-        example = json.loads(path.read_text())
-        columns = example["program_specific_export_columns"]
+    def test_columns_and_overrides_are_resolved_without_mutating_config(self):
+        # Synthetic definitions test the resolver without copying deployment config.
+        columns = {"UMEP": [
+            {"key": "amount", "column_name": "Amount", "target_individual_json_ext_key": "amount",
+             "type": "number", "required": True},
+            {"key": "choice", "column_name": "Choice", "target_individual_json_ext_key": "choice",
+             "type": "select", "options": ["Yes", "No"]},
+        ]}
         with patch.object(HouseholdValidationConfig, "program_specific_export_columns", columns), patch.object(
             HouseholdValidationConfig, "export_column_options_overrides",
-            {"youth_owned_managed": ["Yes", "No", "Unknown"]},
+            {"choice": ["Yes", "No", "Unknown"]},
         ):
             resolved = resolve_programme_columns("umep")
             self.assertEqual(resolved[1]["options"], ["Yes", "No", "Unknown"])
@@ -186,6 +213,58 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
         Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"validation_status": "NOT_VERIFIED"})
         self.assertIn(self.standalone.pk, self.ids())
 
+    def test_source_filter_matches_enrolment_and_excludes_other_sources(self):
+        plan = SimpleNamespace(json_ext={"data_source": "umep"})
+        source = benefit_plan_data_source(plan)
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"data_source": source})
+        Individual.objects.filter(pk=self.second.pk).update(json_ext={"data_source": "other"})
+        rules = {"UMEP": {"subject": "INDIVIDUAL", "data_source": source}}
+        with patch.object(HouseholdValidationConfig, "program_eligibility_rules", rules):
+            result = self.service.select("UMEP")
+            self.assertEqual(result.eligible_individuals, 1)
+            self.assertEqual(result.selected_individuals, 1)
+            self.assertEqual([item.pk for item in result.individuals], [self.standalone.pk])
+            self.assertEqual(configured_programmes()[0]["data_source"], source)
+
+    def test_default_source_includes_legacy_and_explicit_ubr_records(self):
+        for data in ({}, {"data_source": None}, {"data_source": ""}, {"data_source": "ubr"}):
+            with self.subTest(data=data):
+                Individual.objects.filter(pk=self.standalone.pk).update(json_ext=data)
+                self.assertIn(self.standalone.pk, self.ids())
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"data_source": "other"})
+        self.assertNotIn(self.standalone.pk, self.ids())
+
+    def test_explicit_ubr_source_has_the_same_legacy_semantics_as_enrolment(self):
+        expected = self.ids()
+        with patch.object(HouseholdValidationConfig, "program_eligibility_rules", {
+            "UMEP": {"subject": "INDIVIDUAL", "data_source": "ubr"},
+        }):
+            self.assertEqual(self.ids(), expected)
+
+    def test_invalid_backend_config_is_rejected_on_save_without_persisting(self):
+        import json
+
+        for rules in ([], {"UMEP": {"subject": "PERSON"}},
+                      {"UMEP": {"subject": "INDIVIDUAL", "data_source": ""}}):
+            instance = ModuleConfiguration(module="household_validation", layer="be", version="test",
+                                           config=json.dumps({"program_eligibility_rules": rules}))
+            with self.subTest(rules=rules), self.assertRaises(ValidationError) as exc:
+                instance.save()
+            self.assertIn("config", exc.exception.message_dict)
+            self.assertFalse(ModuleConfiguration.objects.filter(pk=instance.pk).exists())
+
+    def test_save_time_validation_preserves_top_level_replacement(self):
+        import json
+
+        for config in ({"export_column_options_overrides": {}}, {
+            "program_eligibility_rules": {"UMEP": {"subject": "INDIVIDUAL", "data_source": "umep"}},
+        }):
+            instance = ModuleConfiguration(module="household_validation", layer="be", version="test",
+                                           config=json.dumps(config))
+            instance.save()
+            instance.refresh_from_db()
+            self.assertEqual(json.loads(instance.config), config)
+
     def test_target_counts_people_and_order_is_stable(self):
         expected = sorted(self.ids(village_code=self.village.code))
         result = self.service.select("UMEP", target_count=2, village_code=self.village.code)
@@ -222,7 +301,7 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
 
     def test_graphql_contract_and_candidate_pagination(self):
         schema = graphene.Schema(query=Query)
-        query = '''{ validationProgrammes { benefitPlanCode subject decisionValues blankDecisionBehavior }
+        query = '''{ validationProgrammes { benefitPlanCode subject dataSource decisionValues blankDecisionBehavior }
           individualValidationCandidates(benefitPlanCode: "UMEP", targetCount: 3, first: 1, offset: 1) {
             eligibleIndividuals selectedIndividuals hasNextPage items { id firstName locationId }
           } }'''
@@ -230,6 +309,7 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
         self.assertIsNone(result.errors)
         programmes = result.data["validationProgrammes"]
         self.assertEqual(programmes[1]["decisionValues"], ["VERIFIED", "NOT_VERIFIED"])
+        self.assertEqual(programmes[1]["dataSource"], "ubr")
         page = result.data["individualValidationCandidates"]
         self.assertEqual(page["selectedIndividuals"], 3)
         self.assertTrue(page["hasNextPage"])

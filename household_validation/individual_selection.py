@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Exists, OuterRef, QuerySet
 
+from individual.data_source import DEFAULT_DATA_SOURCE, data_source_q
 from individual.models import GroupIndividual, Individual
 
 from household_validation.geography import ValidationGeographyMixin
@@ -28,6 +29,8 @@ class EligibleIndividualSelectionService(ValidationGeographyMixin):
         if rule.get("subject") != INDIVIDUAL:
             raise ValidationError("Individual selection requires an INDIVIDUAL programme.")
         queryset = Individual.get_queryset(Individual.objects.filter(is_deleted=False), self.user)
+        # Use the same source-key and legacy untagged-record semantics as enrolment.
+        queryset = queryset.filter(data_source_q(rule.get("data_source", DEFAULT_DATA_SOURCE)))
         # Matches enrolment.membership.active_household_memberships without
         # adding an enrolment-module dependency to registry validation.
         active_membership = GroupIndividual.objects.filter(

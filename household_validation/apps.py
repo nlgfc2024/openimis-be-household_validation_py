@@ -1,6 +1,9 @@
 import logging
 
 from django.apps import AppConfig
+from django.core.exceptions import ValidationError
+
+from core.module_config_registry import register_validator
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +101,9 @@ DEFAULT_CONFIG = {
     # Program Specific Eligibility + selection-strategy rules.
     #
     # - subject: HOUSEHOLD when omitted; INDIVIDUAL enables the individual
-    #   candidate service for that programme (see examples/umep.config.json).
+    #   candidate service for that programme (see README's UMEP section).
+    # - data_source: optional individual source key; defaults to the same
+    #   legacy UBR source as enrolment when omitted.
     # - selection_strategy: presence/absence picks the algorithm. Omitted
     #   (the default), all eligible households are selected, up to
     #   target_count.
@@ -231,6 +236,20 @@ class HouseholdValidationConfig(AppConfig):
         from core.models import ModuleConfiguration
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
         self._load_config(cfg)
+        register_validator(self.name, self._validate_module_config)
+
+    def _validate_module_config(self, instance):
+        """Reject invalid rules on save, before the next application restart."""
+        from household_validation.programmes import programme_rules
+
+        saved = instance._cfg
+        if not isinstance(saved, dict):
+            raise ValidationError({"config": "Module configuration must be an object."})
+        config = {**DEFAULT_CONFIG, **saved}
+        try:
+            programme_rules(config["program_eligibility_rules"])
+        except ValidationError as exc:
+            raise ValidationError({"config": exc.messages}) from exc
 
 
 def apply_column_option_overrides(columns):

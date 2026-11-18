@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 from django.core.exceptions import ValidationError
+from individual.data_source import DEFAULT_DATA_SOURCE
 
 from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig, apply_column_option_overrides
 from household_validation.verification import INDIVIDUAL_DECISIONS
@@ -26,10 +27,14 @@ def programme_rules(rules):
         subject = rule.get("subject", HOUSEHOLD)
         if subject not in (HOUSEHOLD, INDIVIDUAL):
             raise ValidationError(f"Unsupported validation subject for {code}: {subject}")
-        # Individual v1 selects by geography and absence of active membership.
+        # Individual v1 selects by source, geography and absence of active membership.
         # Never silently apply/ignore household member or quota rules here.
-        if subject == INDIVIDUAL and set(rule) - {"subject"}:
-            raise ValidationError(f"Individual validation rule for {code} currently supports only subject.")
+        if subject == INDIVIDUAL:
+            if set(rule) - {"subject", "data_source"}:
+                raise ValidationError(f"Individual validation rule for {code} supports only subject and data_source.")
+            source = rule.get("data_source", DEFAULT_DATA_SOURCE)
+            if not isinstance(source, str) or not source.strip():
+                raise ValidationError(f"Individual validation data_source for {code} must be a non-empty string.")
         normalised[code] = rule
     return normalised
 
@@ -62,6 +67,7 @@ def configured_programmes():
     rules = programme_rules(HouseholdValidationConfig.program_eligibility_rules or {})
     return [
         {"benefit_plan_code": code, "subject": rule.get("subject", HOUSEHOLD),
+         "data_source": rule.get("data_source", DEFAULT_DATA_SOURCE) if rule.get("subject") == INDIVIDUAL else None,
          "columns": resolve_programme_columns(code),
          "decision_values": list(INDIVIDUAL_DECISIONS) if rule.get("subject") == INDIVIDUAL else None,
          "blank_decision_behavior": "SKIP_ROW" if rule.get("subject") == INDIVIDUAL else None}

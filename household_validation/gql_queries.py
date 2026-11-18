@@ -5,6 +5,7 @@ from graphene.types.generic import GenericScalar
 class ValidationProgrammeGQLType(graphene.ObjectType):
     benefit_plan_code = graphene.String(required=True)
     subject = graphene.String(required=True)
+    data_source = graphene.String()
     columns = GenericScalar()
     decision_values = graphene.List(graphene.String)
     blank_decision_behavior = graphene.String()
