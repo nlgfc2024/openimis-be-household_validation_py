@@ -407,7 +407,7 @@ query {
   }
   individualValidationCandidates(
     benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
-    targetCount: 100, first: 20, offset: 0
+    excludeValidated: true, targetCount: 100, first: 20, offset: 0
   ) {
     eligibleIndividuals selectedIndividuals hasNextPage
     items { id firstName lastName dob locationId }
@@ -421,6 +421,13 @@ own location, with no household fallback. `targetCount: 0` selects none; omittin
 the target selects all eligible candidates before pagination. Programme discovery
 exposes configured entries only. Existing household queries and mutations retain
 their household behavior.
+
+`excludeValidated: true` excludes people whose individual `validation_status` is
+`VERIFIED` or `NOT_VERIFIED`, before counting, targeting and pagination. Missing,
+null, blank and unsupported statuses remain candidates. The default is `false`
+so existing calls can still select people for revalidation. This is an explicit
+status filter, not a date cutoff. Live candidate counts are computed per request;
+the query is not a persisted list or cached snapshot.
 
 ---
 

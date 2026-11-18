@@ -2,13 +2,14 @@
 from dataclasses import dataclass
 
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Exists, OuterRef, QuerySet
+from django.db.models import Exists, OuterRef, Q, QuerySet
 
 from individual.data_source import DEFAULT_DATA_SOURCE, data_source_q
 from individual.models import GroupIndividual, Individual
 
 from household_validation.geography import ValidationGeographyMixin
 from household_validation.programmes import INDIVIDUAL, resolve_programme_rule
+from household_validation.verification import INDIVIDUAL_DECISIONS
 
 
 @dataclass(frozen=True)
@@ -22,15 +23,24 @@ class EligibleIndividualSelectionService(ValidationGeographyMixin):
     def __init__(self, user):
         self.user = user
 
-    def candidates(self, benefit_plan_code, **geography):
+    def candidates(self, benefit_plan_code, exclude_validated=False, **geography):
         if not self.user or getattr(self.user, "is_anonymous", False) or not getattr(self.user, "id", None):
             raise PermissionDenied("An authenticated user is required for individual validation.")
+        if type(exclude_validated) is not bool:
+            raise ValidationError("exclude_validated must be a boolean.")
         rule = resolve_programme_rule(benefit_plan_code)
         if rule.get("subject") != INDIVIDUAL:
             raise ValidationError("Individual selection requires an INDIVIDUAL programme.")
         queryset = Individual.get_queryset(Individual.objects.filter(is_deleted=False), self.user)
         # Use the same source-key and legacy untagged-record semantics as enrolment.
         queryset = queryset.filter(data_source_q(rule.get("data_source", DEFAULT_DATA_SOURCE)))
+        if exclude_validated:
+            # JSON key exclusion alone drops missing keys through SQL NULL;
+            # unassessed people must remain candidates.
+            queryset = queryset.filter(
+                Q(json_ext__validation_status__isnull=True)
+                | ~Q(json_ext__validation_status__in=INDIVIDUAL_DECISIONS)
+            )
         # Matches enrolment.membership.active_household_memberships without
         # adding an enrolment-module dependency to registry validation.
         active_membership = GroupIndividual.objects.filter(

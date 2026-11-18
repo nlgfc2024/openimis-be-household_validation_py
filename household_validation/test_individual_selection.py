@@ -210,8 +210,59 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
         self.assertIn(self.former_member.pk, self.ids(district_code=self.other.code))
 
     def test_candidates_do_not_require_existing_verified_status(self):
-        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"validation_status": "NOT_VERIFIED"})
-        self.assertIn(self.standalone.pk, self.ids())
+        for status in ("VERIFIED", "NOT_VERIFIED"):
+            with self.subTest(status=status):
+                Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"validation_status": status})
+                self.assertIn(self.standalone.pk, self.ids())
+
+    def test_opt_in_exclusion_removes_both_decisions_before_counts_and_target(self):
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"validation_status": "VERIFIED"})
+        Individual.objects.filter(pk=self.second.pk).update(json_ext={"validation_status": "NOT_VERIFIED"})
+        result = self.service.select("UMEP", exclude_validated=True, target_count=1, village_code=self.village.code)
+        self.assertEqual(result.eligible_individuals, 2)
+        self.assertEqual(result.selected_individuals, 1)
+        self.assertEqual([item.pk for item in result.individuals],
+                         sorted([self.former_member.pk, self.deleted_group_member.pk])[:1])
+
+    def test_opt_in_exclusion_keeps_unassessed_or_unsupported_statuses(self):
+        for value in ({}, {"validation_status": None}, {"validation_status": ""},
+                      {"validation_status": "REJECTED"}):
+            with self.subTest(value=value):
+                Individual.objects.filter(pk=self.standalone.pk).update(json_ext=value)
+                self.assertIn(self.standalone.pk, self.ids(exclude_validated=True))
+
+    def test_opt_in_exclusion_rejects_nonboolean_values(self):
+        for value in (None, "true", 1):
+            with self.subTest(value=value), self.assertRaises(ValidationError):
+                self.service.select("UMEP", exclude_validated=value)
+
+    def test_active_household_exclusion_matches_enrolment(self):
+        from django.apps import apps
+        if not apps.is_installed("enrolment"):
+            self.skipTest("Enrolment is optional; compare definitions when it is installed.")
+        from enrolment.membership import active_household_memberships
+        from individual.data_source import DEFAULT_DATA_SOURCE, data_source_q
+
+        expected = Individual.get_queryset(Individual.objects.filter(is_deleted=False), self.user).filter(
+            data_source_q(DEFAULT_DATA_SOURCE),
+        ).exclude(pk__in=active_household_memberships().values("individual_id"))
+        self.assertEqual(self.ids(), set(expected.values_list("pk", flat=True)))
+
+    def test_graphql_exclusion_and_pagination_use_filtered_counts(self):
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"validation_status": "VERIFIED"})
+        Individual.objects.filter(pk=self.second.pk).update(json_ext={"validation_status": "NOT_VERIFIED"})
+        schema = graphene.Schema(query=Query)
+        result = schema.execute('''{ individualValidationCandidates(
+          benefitPlanCode: "UMEP", villageCode: "UV-V", excludeValidated: true, first: 1, offset: 1
+        ) { eligibleIndividuals selectedIndividuals hasNextPage items { id } } }''',
+                                context_value=SimpleNamespace(user=self.user))
+        self.assertIsNone(result.errors)
+        page = result.data["individualValidationCandidates"]
+        self.assertEqual(page["eligibleIndividuals"], 2)
+        self.assertEqual(page["selectedIndividuals"], 2)
+        self.assertFalse(page["hasNextPage"])
+        self.assertEqual(len(page["items"]), 1)
+        self.assertNotIn(page["items"][0]["id"], [str(self.standalone.pk), str(self.second.pk)])
 
     def test_source_filter_matches_enrolment_and_excludes_other_sources(self):
         plan = SimpleNamespace(json_ext={"data_source": "umep"})

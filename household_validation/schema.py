@@ -87,6 +87,7 @@ class Query(graphene.ObjectType):
     validation_programmes = graphene.List(ValidationProgrammeGQLType)
     individual_validation_candidates = graphene.Field(
         IndividualValidationCandidatesGQLType,
+        exclude_validated=graphene.Argument(graphene.Boolean, default_value=False),
         first=graphene.Argument(graphene.Int, default_value=20),
         offset=graphene.Argument(graphene.Int, default_value=0),
         **{
