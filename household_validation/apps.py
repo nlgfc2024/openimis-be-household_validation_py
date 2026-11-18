@@ -97,6 +97,8 @@ DEFAULT_CONFIG = {
     "group_update_perms": [str(RIGHT_GROUP_UPDATE)],
     # Program Specific Eligibility + selection-strategy rules.
     #
+    # - subject: HOUSEHOLD when omitted; INDIVIDUAL enables the individual
+    #   candidate service for that programme (see examples/umep.config.json).
     # - selection_strategy: presence/absence picks the algorithm. Omitted
     #   (the default), all eligible households are selected, up to
     #   target_count.
@@ -208,6 +210,10 @@ class HouseholdValidationConfig(AppConfig):
         """
         Load config fields that match current AppConfig class fields.
         """
+        from household_validation.programmes import programme_rules
+
+        if "program_eligibility_rules" in cfg:
+            programme_rules(cfg["program_eligibility_rules"])
         stale_keys = [key for key in RETIRED_CONFIG_KEYS if key in cfg]
         if stale_keys:
             logger.warning(

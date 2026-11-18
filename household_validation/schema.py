@@ -1,7 +1,7 @@
 import base64
 
 import graphene
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 
 from household_validation.apps import HouseholdValidationConfig
@@ -15,6 +15,8 @@ from household_validation.gql_mutations import (
     UploadHouseholdValidationListMutation,
 )
 from household_validation.gql_queries import (
+    ValidationProgrammeGQLType,
+    IndividualValidationCandidatesGQLType,
     HouseholdValidationBatchRowsGQLType,
     HouseholdValidationBatchesGQLType,
     HouseholdValidationErrorReportGQLType,
@@ -23,6 +25,8 @@ from household_validation.gql_queries import (
     HouseholdValidationPreviewPageInfoGQLType,
     HouseholdValidationProjectsGQLType,
 )
+from household_validation.individual_selection import EligibleIndividualSelectionService
+from household_validation.programmes import configured_programmes
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
@@ -80,6 +84,17 @@ def validation_filter_args():
 
 
 class Query(graphene.ObjectType):
+    validation_programmes = graphene.List(ValidationProgrammeGQLType)
+    individual_validation_candidates = graphene.Field(
+        IndividualValidationCandidatesGQLType,
+        first=graphene.Argument(graphene.Int, default_value=20),
+        offset=graphene.Argument(graphene.Int, default_value=0),
+        **{
+            key: (graphene.Argument(graphene.String, required=True) if key == "benefit_plan_code" else value)
+            for key, value in validation_filter_args().items()
+            if key != "exclude_verified_after"
+        },
+    )
     household_validation_preview = graphene.Field(
         HouseholdValidationPreviewGQLType,
         first=graphene.Argument(graphene.Int, required=False),
@@ -113,6 +128,26 @@ class Query(graphene.ObjectType):
         HouseholdValidationErrorReportGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
     )
+
+    def resolve_validation_programmes(parent, info):
+        Query._check_permissions(
+            info.context.user, HouseholdValidationConfig.gql_query_household_validation_rule_perms,
+        )
+        return configured_programmes()
+
+    def resolve_individual_validation_candidates(parent, info, first=20, offset=0, **kwargs):
+        Query._check_permissions(
+            info.context.user, HouseholdValidationConfig.gql_query_household_validation_rule_perms,
+        )
+        if first is None or first < 0 or first > 100 or offset is None or offset < 0:
+            raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
+        result = EligibleIndividualSelectionService(info.context.user).select(**kwargs)
+        return IndividualValidationCandidatesGQLType(
+            eligible_individuals=result.eligible_individuals,
+            selected_individuals=result.selected_individuals,
+            items=list(result.individuals[offset:offset + first]),
+            has_next_page=offset + first < result.selected_individuals,
+        )
 
     def resolve_household_validation_preview(parent, info, **kwargs):
         Query._check_permissions(

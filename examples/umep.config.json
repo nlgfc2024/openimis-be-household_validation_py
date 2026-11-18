@@ -1,0 +1,96 @@
+{
+  "program_eligibility_rules": {
+    "PWP": {
+      "member_flag": "fit_for_work",
+      "selection_strategy": {
+        "female_headed_percentage": 40,
+        "youth_headed_percentage": 40,
+        "reserve_percentage": 20,
+        "allocate_by_village": true
+      }
+    },
+    "UMEP": {
+      "subject": "INDIVIDUAL"
+    }
+  },
+  "program_specific_export_columns": {
+    "PWP": [
+      {
+        "key": "has_business",
+        "column_name": "Does member have a business",
+        "target_individual_json_ext_key": "business_experience",
+        "type": "select",
+        "options": [
+          "Yes",
+          "No"
+        ],
+        "required": false
+      },
+      {
+        "key": "business_type",
+        "column_name": "Type of Business",
+        "target_individual_json_ext_key": "type_of_business",
+        "type": "select",
+        "options": [
+          "Crop farming",
+          "Livestock farming",
+          "Grocery shop",
+          "Tailoring",
+          "Transport services",
+          "Other businesses"
+        ],
+        "required": true,
+        "depends_on": {
+          "key": "has_business",
+          "equals": "Yes"
+        }
+      },
+      {
+        "key": "business_duration",
+        "column_name": "Business Period (in years)",
+        "target_individual_json_ext_key": "business_period",
+        "type": "number",
+        "min": 0,
+        "max": 100,
+        "required": true,
+        "depends_on": {
+          "key": "has_business",
+          "equals": "Yes"
+        }
+      }
+    ],
+    "UMEP": [
+      {
+        "key": "monthly_turnover",
+        "column_name": "Monthly turnover (MWK)",
+        "target_individual_json_ext_key": "monthly_turnover",
+        "type": "number",
+        "min": 0,
+        "required": true
+      },
+      {
+        "key": "youth_owned_managed",
+        "column_name": "Youth owned and managed",
+        "target_individual_json_ext_key": "youth_owned_managed",
+        "type": "select",
+        "options": [
+          "Yes",
+          "No"
+        ],
+        "required": true
+      },
+      {
+        "key": "inclusion_contribution",
+        "column_name": "Inclusion and socio-economic contribution",
+        "target_individual_json_ext_key": "inclusion_contribution",
+        "type": "select",
+        "options": [
+          "Yes",
+          "No"
+        ],
+        "required": true
+      }
+    ]
+  },
+  "export_column_options_overrides": {}
+}

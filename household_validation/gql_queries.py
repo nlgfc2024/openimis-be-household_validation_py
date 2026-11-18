@@ -2,6 +2,29 @@ import graphene
 from graphene.types.generic import GenericScalar
 
 
+class ValidationProgrammeGQLType(graphene.ObjectType):
+    benefit_plan_code = graphene.String(required=True)
+    subject = graphene.String(required=True)
+    columns = GenericScalar()
+    decision_values = graphene.List(graphene.String)
+    blank_decision_behavior = graphene.String()
+
+
+class IndividualValidationCandidateGQLType(graphene.ObjectType):
+    id = graphene.UUID()
+    first_name = graphene.String()
+    last_name = graphene.String()
+    dob = graphene.Date()
+    location_id = graphene.Int()
+
+
+class IndividualValidationCandidatesGQLType(graphene.ObjectType):
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    items = graphene.List(IndividualValidationCandidateGQLType)
+    has_next_page = graphene.Boolean()
+
+
 class HouseholdValidationProjectGQLType(graphene.ObjectType):
     id = graphene.String()
     name = graphene.String()

@@ -25,6 +25,7 @@ The module enables:
 - [Selection Logic](#selection-logic)
 - [Program-Based Selection](#program-based-selection)
 - [Configuration](#configuration)
+- [UMEP Individual Selection](docs/umep-individual-validation.md)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -282,7 +283,9 @@ export_column_options_overrides
 
 These values are stored in the module's `ModuleConfiguration`.
 
-The configuration is backend-only and is not exposed through GraphQL.
+The configuration remains backend-owned. The permission-checked
+`validationProgrammes` query exposes programme codes, resolved subjects,
+effective export columns and the individual decision contract to the frontend.
 
 ---
 
