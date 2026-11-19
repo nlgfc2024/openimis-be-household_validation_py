@@ -438,6 +438,58 @@ so existing calls can still select people for revalidation. This is an explicit
 status filter, not a date cutoff. Live candidate counts are computed per request;
 the query is not a persisted list or cached snapshot.
 
+### Saved individual lists and workbooks
+
+`generateIndividualValidationList` uses the individual programme's selection
+service and creates an existing validation batch containing the selected IDs,
+descriptive values, effective rule/source, columns (including option overrides),
+filters and counts in `batch.json_ext`. Preview and re-export read this snapshot;
+later registry or configuration edits do not change an issued list. The decision
+cells start blank, including when generating a list for revalidation.
+
+```graphql
+mutation {
+  generateIndividualValidationList(
+    benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
+    excludeValidated: true, targetCount: 100
+  ) { batchId fileName fileBase64 eligibleIndividuals selectedIndividuals generatedAt }
+}
+```
+
+```graphql
+query SavedIndividualList($id: UUID!) {
+  individualValidationList(batchId: $id, first: 20, offset: 0) {
+    batchId columns items eligibleIndividuals selectedIndividuals hasNextPage
+  }
+  individualValidationListExport(batchId: $id) {
+    batchId fileName fileBase64 eligibleIndividuals selectedIndividuals
+  }
+}
+```
+
+`items` contains saved row dictionaries. Saved-list pagination uses saved counts
+without repeating live candidate selection/counting. Generation reuses right
+`958001`; reads/exports use the configured query right. Access to all selected
+individuals is rechecked against the current user's scope. Empty lists are
+accessible to their creator or an administrator. Historical household batches
+and their workbook APIs retain their existing behavior.
+
+The individual workbook contains protected batch/individual identity and
+descriptive fields, plus editable decisions, notes and configured programme
+columns. It does not require a household, household head or Primary Worker.
+`IndividualValidationListService(user).parse(bytes_or_file)` requires the upload
+right (`958002`) and an existing accessible individual batch. It returns global
+file errors and per-row errors/raw values, decisions, notes and parsed JSON-field
+updates; it does **not** save upload attempts or apply updates. `valid_rows` is
+empty on global file errors and otherwise excludes erroneous rows; a valid row
+with `decision is None` must be skipped without applying any fields.
+
+Parsing uses only the batch's saved columns and identity set, checks protected
+values, rejects unknown/mixed batches, foreign/duplicate IDs, unexpected/missing
+headers and formulas, and enforces applicable types, options, numeric bounds,
+required fields and dependencies. A blank decision skips programme-field
+validation and updates; a submitted invalid row has no parsed updates to apply.
+
 ---
 
 ## Program-Specific Export Columns

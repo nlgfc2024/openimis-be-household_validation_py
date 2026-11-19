@@ -26,6 +26,15 @@ class IndividualValidationCandidatesGQLType(graphene.ObjectType):
     has_next_page = graphene.Boolean()
 
 
+class IndividualValidationSavedListGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    columns = GenericScalar()
+    items = graphene.List(GenericScalar)
+    has_next_page = graphene.Boolean()
+
+
 class HouseholdValidationProjectGQLType(graphene.ObjectType):
     id = graphene.String()
     name = graphene.String()
