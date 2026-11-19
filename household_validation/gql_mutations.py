@@ -41,6 +41,10 @@ class IndividualValidationGenerateResultGQLType(graphene.ObjectType):
     file_base64 = graphene.String()
     eligible_individuals = graphene.Int()
     selected_individuals = graphene.Int()
+    available_individuals = graphene.Int()
+    deleted_individuals = graphene.Int()
+    missing_individuals = graphene.Int()
+    inaccessible_individuals = graphene.Int()
     generated_at = graphene.DateTime()
 
 
@@ -83,11 +87,16 @@ class UploadIndividualValidationListMutation(graphene.Mutation):
 
 
 def individual_workbook_result(batch, content):
+    counts = getattr(batch, "_individual_read_counts", {
+        "available_individuals": batch.json_ext["selected_individuals"],
+        "deleted_individuals": 0, "missing_individuals": 0, "inaccessible_individuals": 0,
+    })
     return IndividualValidationGenerateResultGQLType(
         batch_id=batch.pk, file_name=f"individual_validation_{batch.pk}.xlsx",
         file_base64=base64.b64encode(content).decode("ascii"), generated_at=batch.generated_at,
         eligible_individuals=batch.json_ext["eligible_individuals"],
         selected_individuals=batch.json_ext["selected_individuals"],
+        **counts,
     )
 
 

@@ -67,6 +67,25 @@ def resolve_programme_columns(benefit_plan_code=None):
     return deepcopy(apply_column_option_overrides(resolved))
 
 
+def individual_workbook_fields(config):
+    from household_validation.individual_workbook import validate_display_fields
+
+    if not isinstance(config, dict):
+        raise ValidationError("individual_workbook_fields must be a programme-keyed object.")
+    resolved = {}
+    for code, fields in config.items():
+        if not isinstance(code, str) or not code.strip() or code.strip().upper() in resolved:
+            raise ValidationError("Individual workbook programme codes must be non-empty and unique.")
+        validate_display_fields(fields)
+        resolved[code.strip().upper()] = deepcopy(fields)
+    return resolved
+
+
+def resolve_individual_workbook_fields(benefit_plan_code):
+    fields = individual_workbook_fields(HouseholdValidationConfig.individual_workbook_fields or {})
+    return fields.get(benefit_plan_code.strip().upper(), [])
+
+
 def configured_programmes():
     rules = programme_rules(HouseholdValidationConfig.program_eligibility_rules or {})
     return [

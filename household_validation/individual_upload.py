@@ -16,6 +16,7 @@ from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
 from household_validation.individual_lists import _json_snapshot
 from household_validation.individual_selection import EligibleIndividualSelectionService
+from household_validation.individual_snapshots import is_individual_list, selected_individual_ids
 from household_validation.individual_workbook import (
     IndividualValidationListExporter, ParsedIndividualValidationRow, load_individual_workbook,
     parse_individual_validation_workbook, workbook_batch_id,
@@ -44,10 +45,9 @@ class IndividualValidationUploadService:
             batch = HouseholdValidationBatch.objects.get(pk=batch_id, is_deleted=False)
         except (HouseholdValidationBatch.DoesNotExist, ValueError, ValidationError) as exc:
             raise ValidationError("Unknown individual validation batch.") from exc
-        data = batch.json_ext or {}
-        if data.get("subject") != "INDIVIDUAL" or not isinstance(data.get("selection"), list):
+        if not is_individual_list(batch):
             raise ValidationError("Batch is not a generated individual list.")
-        selected = {row["individual_uuid"] for row in data["selection"]}
+        selected = {str(pk) for pk in selected_individual_ids(batch)}
         existing = {str(pk) for pk in Individual.objects.filter(pk__in=selected).values_list("pk", flat=True)}
         scoped = Individual.get_queryset(Individual.objects.filter(pk__in=selected, is_deleted=False), self.user)
         visible = {str(person.pk): person for person in scoped.distinct()}
