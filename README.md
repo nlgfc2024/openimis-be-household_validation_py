@@ -376,10 +376,19 @@ existing `program_eligibility_rules`. Omitted subjects remain `HOUSEHOLD`; other
 subject values are rejected. Individual rules accept `subject` and an optional
 non-empty `data_source` only. Set the source to the UMEP Phase's
 `json_ext.data_source`; when omitted, both validation and enrolment default to
-`ubr`, including legacy missing, null and empty source tags. Other source keys
-match exactly. Candidates are accessible, non-deleted individuals outside active
-households, filtered through `Individual.location` and ordered by primary key.
+`ubr`, including legacy missing, null and empty source tags. Surrounding whitespace
+in a configured individual source is stripped when read; case is preserved and
+other source keys match exactly. Candidates are accessible, non-deleted individuals
+outside active households, filtered through `Individual.location` and ordered by primary key.
 Targets count people.
+
+The source-rule names deliberately retain different matching contracts:
+household `requires_data_source` is an optional member eligibility requirement,
+with case-insensitive matching and no implicit source default. Individual
+`data_source` scopes candidates through enrolment's `data_source_q` semantics,
+including the UBR default and legacy-tag handling above. Keeping both contracts
+preserves existing household deployments while aligning individual validation
+with the UMEP enrolment population.
 
 Deployment configuration is maintained in
 [nlgfc2024/coremis-configs](https://github.com/nlgfc2024/coremis-configs/blob/main/household_validation/umep.household_validation.config.json).

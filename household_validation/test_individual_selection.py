@@ -69,6 +69,13 @@ class ProgrammeSubjectTests(TestCase):
             with self.subTest(source=source), self.assertRaises(ValidationError):
                 programme_rules({"UMEP": {"subject": "INDIVIDUAL", "data_source": source}})
 
+    def test_configured_source_is_trimmed_on_read_without_changing_case_or_input(self):
+        rules = {"UMEP": {"subject": "INDIVIDUAL", "data_source": " UMEP "}}
+        with patch.object(HouseholdValidationConfig, "program_eligibility_rules", rules):
+            self.assertEqual(resolve_programme_rule("UMEP")["data_source"], "UMEP")
+            self.assertEqual(configured_programmes()[0]["data_source"], "UMEP")
+        self.assertEqual(rules["UMEP"]["data_source"], " UMEP ")
+
     def test_ready_registers_save_time_validator(self):
         from django.apps import apps
 
@@ -276,6 +283,15 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
             self.assertEqual(result.selected_individuals, 1)
             self.assertEqual([item.pk for item in result.individuals], [self.standalone.pk])
             self.assertEqual(configured_programmes()[0]["data_source"], source)
+
+    def test_padded_sources_select_the_same_candidates_as_trimmed_source_keys(self):
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"data_source": "umep"})
+        ubr_ids = self.ids()
+        for source, expected in ((" umep ", {self.standalone.pk}), (" ubr ", ubr_ids), (" UMEP ", set())):
+            with self.subTest(source=source), patch.object(HouseholdValidationConfig, "program_eligibility_rules", {
+                "UMEP": {"subject": "INDIVIDUAL", "data_source": source},
+            }):
+                self.assertEqual(self.ids(), expected)
 
     def test_default_source_includes_legacy_and_explicit_ubr_records(self):
         for data in ({}, {"data_source": None}, {"data_source": ""}, {"data_source": "ubr"}):

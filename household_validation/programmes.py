@@ -35,6 +35,10 @@ def programme_rules(rules):
             source = rule.get("data_source", DEFAULT_DATA_SOURCE)
             if not isinstance(source, str) or not source.strip():
                 raise ValidationError(f"Individual validation data_source for {code} must be a non-empty string.")
+            if "data_source" in rule:
+                # Normalise on read without changing stored configuration or
+                # case-sensitive source keys shared with enrolment.
+                rule = {**rule, "data_source": source.strip()}
         normalised[code] = rule
     return normalised
 
