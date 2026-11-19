@@ -505,9 +505,8 @@ Protected display columns are configured per programme through
 `individual_workbook_fields`. Each definition supplies `column_name` and exactly
 one of `json_ext_key` or `location_type` (`R`, `D`, `W` or `V`). Labels and identity
 source keys are deployment choices; the backend supplies no UMEP-specific labels.
-For example, a deployment storing cities at `R`, wards at `D` and neighbourhoods
-at `V` can use the following mapping. UMEP enrolment confirms `R` for city;
-the ward/neighbourhood types must be matched to the deployment registry:
+UMEP uses `R` for City, `W` (GVH) for Ward and `V` for Neighbourhood, with no
+UMEP equivalent for `D` (TA). Its deployment configuration is:
 
 ```json
 {
@@ -516,7 +515,7 @@ the ward/neighbourhood types must be matched to the deployment registry:
       {"column_name": "National ID", "json_ext_key": "national_id"},
       {"column_name": "Gender", "json_ext_key": "gender"},
       {"column_name": "City", "location_type": "R"},
-      {"column_name": "Ward", "location_type": "D"},
+      {"column_name": "Ward", "location_type": "W"},
       {"column_name": "Neighbourhood", "location_type": "V"}
     ]
   }
