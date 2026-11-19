@@ -20,6 +20,7 @@ from household_validation import test_individual_selection as fixtures
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.individual_lists import IndividualValidationListService
 from household_validation.individual_selection import EligibleIndividualSelectionService
+from household_validation.individual_snapshots import iter_selection, selection_rows
 from household_validation.individual_workbook import (
     BASE_COLUMNS, INDIVIDUAL_SHEET, METADATA_SHEET, IndividualValidationListExporter, validate_individual_columns,
 )
@@ -40,6 +41,15 @@ COLUMNS = [
 ]
 
 
+DISPLAY_FIELDS = [
+    {"column_name": "national_id", "json_ext_key": "national_id"},
+    {"column_name": "gender", "json_ext_key": "gender"},
+    {"column_name": "City", "location_type": "D"},
+    {"column_name": "Ward", "location_type": "W"},
+    {"column_name": "Neighbourhood", "location_type": "V"},
+]
+
+
 class IndividualWorkbookTests(TestCase):
     @classmethod
     def setUpTestData(cls):
@@ -50,6 +60,7 @@ class IndividualWorkbookTests(TestCase):
             ("program_eligibility_rules", fixtures.RULES),
             ("program_specific_export_columns", {"UMEP": deepcopy(COLUMNS)}),
             ("export_column_options_overrides", {}),
+            ("individual_workbook_fields", {"UMEP": deepcopy(DISPLAY_FIELDS)}),
         ):
             context = patch.object(HouseholdValidationConfig, key, deepcopy(value))
             context.start()
@@ -102,8 +113,12 @@ class IndividualWorkbookTests(TestCase):
         self.assertEqual(data["columns"][2]["options"], ["Approved"])
         expected = sorted([str(self.standalone.pk), str(self.second.pk),
                            str(self.former_member.pk), str(self.deleted_group_member.pk)])[:2]
-        self.assertEqual([row["individual_uuid"] for row in data["selection"]], expected)
-        self.assertEqual(HouseholdValidationBatchRow.objects.filter(batch=batch).count(), 0)
+        self.assertNotIn("selection", data)
+        self.assertEqual(data["display_fields"], DISPLAY_FIELDS)
+        self.assertEqual([row["individual_uuid"] for row in iter_selection(batch)], expected)
+        self.assertEqual(selection_rows(batch).count(), 2)
+        self.assertEqual(selection_rows(batch).filter(upload_attempt_id__isnull=True, status="PENDING").count(), 2)
+        self.assertEqual(HouseholdValidationBatchRow.history.filter(batch_id=batch.pk).count(), 2)
         sheet = self.workbook(content)[INDIVIDUAL_SHEET]
         self.assertEqual([sheet.cell(i, 2).value for i in (2, 3)], expected)
 
@@ -124,7 +139,7 @@ class IndividualWorkbookTests(TestCase):
         new = list(self.workbook(exported)[INDIVIDUAL_SHEET].values)
         self.assertEqual(old, new)
 
-    def test_saved_pagination_uses_saved_counts_without_count_or_reselection(self):
+    def test_saved_pagination_uses_database_pages_without_reselection(self):
         batch, _ = self.generate(target_count=3)
         with patch.object(EligibleIndividualSelectionService, "select", side_effect=AssertionError("Live selection")), \
                 CaptureQueriesContext(connection) as queries:
@@ -133,7 +148,11 @@ class IndividualWorkbookTests(TestCase):
         self.assertEqual(first["eligible_individuals"], 4)
         self.assertEqual(second["selected_individuals"], 3)
         self.assertNotEqual(first["items"], second["items"])
-        self.assertFalse(any("COUNT(" in query["sql"].upper() for query in queries))
+        page_queries = [query["sql"] for query in queries
+                        if '"household_validation_householdvalidationbatchrow"."raw_row"' in query["sql"]]
+        self.assertEqual(len(page_queries), 2)
+        self.assertIn("LIMIT 1", page_queries[0])
+        self.assertIn("LIMIT 1 OFFSET 1", page_queries[1])
 
     def test_workbook_has_individual_fields_decisions_and_editable_configured_columns(self):
         _, content = self.generate(target_count=1)
@@ -166,6 +185,7 @@ class IndividualWorkbookTests(TestCase):
             with self.subTest(decision=decision):
                 batch, workbook = self.submitted_workbook(decision=decision, validation_notes="Checked")
                 before = list(Individual.objects.values_list("pk", "json_ext"))
+                row_history = HouseholdValidationBatchRow.history.count()
                 result = self.service.parse(self.serialise(workbook))
                 self.assertFalse(result.errors)
                 self.assertFalse(result.rows[0].errors)
@@ -175,7 +195,9 @@ class IndividualWorkbookTests(TestCase):
                 self.assertIsNone(result.rows[0].updates["kind"])
                 self.assertEqual(result.rows[0].notes, "Checked")
                 self.assertEqual(before, list(Individual.objects.values_list("pk", "json_ext")))
-                self.assertFalse(batch.rows.exists())
+                self.assertEqual(batch.rows.count(), 1)
+                self.assertFalse(batch.rows.filter(upload_attempt_id__isnull=False).exists())
+                self.assertEqual(HouseholdValidationBatchRow.history.count(), row_history)
 
     def test_snapshot_parser_does_not_accept_current_or_other_programmes_looser_rules(self):
         _, workbook = self.submitted_workbook(Turnover=500, **{"Owns business": "Yes", "Business kind": "Other"})
@@ -263,9 +285,14 @@ class IndividualWorkbookTests(TestCase):
 
     def test_current_access_is_rechecked_and_unknown_or_household_batches_rejected(self):
         batch, content = self.generate(target_count=1)
-        with patch.object(Individual, "get_queryset", side_effect=lambda qs, user: qs.none()):
-            for action in (lambda: self.service.preview(batch.pk), lambda: self.service.export(batch.pk),
-                           lambda: self.service.parse(content)):
+        unrelated = User.objects.create(username="unrelated-list-reader")
+        unrelated.has_perms = lambda perms: True
+        service = IndividualValidationListService(unrelated)
+        with patch.object(User, "is_imis_admin", new_callable=PropertyMock, return_value=False), patch.object(
+            Individual, "get_queryset", side_effect=lambda qs, user: qs.none(),
+        ):
+            for action in (lambda: service.preview(batch.pk), lambda: service.export(batch.pk),
+                           lambda: service.parse(content)):
                 with self.assertRaises(PermissionDenied):
                     action()
         with self.assertRaises(ValidationError):
@@ -297,7 +324,7 @@ class IndividualWorkbookTests(TestCase):
         attempt = uuid4()
         row = HouseholdValidationBatchRow(
             batch=batch, row_number=2, upload_attempt_id=attempt,
-            individual_id=batch.json_ext["selection"][0]["individual_uuid"],
+            individual_id=next(iter_selection(batch))["individual_uuid"],
             status="ERROR", raw_row={"first_name": "Private"},
         )
         row.save(user=self.actor)
@@ -325,6 +352,8 @@ class IndividualWorkbookTests(TestCase):
             with self.assertRaises(ValueError):
                 self.generate()
         self.assertFalse(HouseholdValidationBatch.objects.exists())
+        self.assertFalse(HouseholdValidationBatchRow.objects.exists())
+        self.assertFalse(HouseholdValidationBatchRow.history.exists())
 
     def test_snapshot_data_is_exported_as_literal_text_not_formulas(self):
         Individual.objects.filter(pk=self.standalone.pk).update(first_name="=1+1", json_ext={"national_id": "00123"})
@@ -377,3 +406,218 @@ class IndividualWorkbookTests(TestCase):
     def test_shared_column_validator_accepts_dependency_and_override_definitions(self):
         validate_individual_columns(deepcopy(COLUMNS))
         self.assertTrue(set(BASE_COLUMNS).isdisjoint({"group_uuid", "primary_worker"}))
+
+    def test_one_deleted_person_does_not_block_preview_export_or_other_parse_rows(self):
+        batch, content = self.generate(target_count=3)
+        selected = list(iter_selection(batch))
+        deleted = selected[1]["individual_uuid"]
+        Individual.objects.filter(pk=deleted).update(is_deleted=True)
+        page = self.service.preview(batch.pk)
+        self.assertEqual(page["selected_individuals"], 3)
+        self.assertEqual(page["available_individuals"], 2)
+        self.assertEqual(page["deleted_individuals"], 1)
+        self.assertEqual(page["inaccessible_individuals"], 0)
+        self.assertNotIn(deleted, [row["individual_uuid"] for row in page["items"]])
+        exported_batch, exported = self.service.export(batch.pk)
+        self.assertEqual(exported_batch._individual_read_counts["deleted_individuals"], 1)
+        self.assertEqual(self.workbook(exported)[INDIVIDUAL_SHEET].max_row, 3)
+        self.assertFalse(self.service.parse(exported).errors)
+        result = self.service.parse(content)
+        self.assertFalse(result.errors)
+        self.assertEqual(len(result.valid_rows), 2)
+        self.assertIn("deleted", result.rows[1].errors[0])
+        self.assertEqual(result.rows[1].updates, {})
+
+    def test_partial_current_access_filters_rows_and_reports_omissions(self):
+        batch, content = self.generate(target_count=3)
+        selected = list(iter_selection(batch))
+        hidden = selected[0]["individual_uuid"]
+        with patch.object(Individual, "get_queryset", side_effect=lambda qs, user: qs.exclude(pk=hidden)):
+            first = self.service.preview(batch.pk, first=1)
+            second = self.service.preview(batch.pk, first=1, offset=1)
+            self.assertEqual(first["available_individuals"], 2)
+            self.assertEqual(first["inaccessible_individuals"], 1)
+            self.assertEqual(first["deleted_individuals"], 0)
+            self.assertTrue(first["has_next_page"])
+            self.assertFalse(second["has_next_page"])
+            self.assertEqual(first["items"][0]["individual_uuid"], selected[1]["individual_uuid"])
+            _, exported = self.service.export(batch.pk)
+            exported_rows = self.workbook(exported)[INDIVIDUAL_SHEET].iter_rows(min_row=2)
+            self.assertNotIn(hidden, [row[1].value for row in exported_rows])
+            result = self.service.parse(content)
+            self.assertEqual(len(result.valid_rows), 2)
+            self.assertIn("outside your current access", result.rows[0].errors[0])
+            self.assertFalse(result.rows[0].updates)
+
+    def test_creator_can_inspect_omission_counts_when_no_rows_remain_accessible(self):
+        batch, content = self.generate(target_count=2)
+        Individual.objects.filter(pk__in=selection_rows(batch).values("individual_id")).update(is_deleted=True)
+        with patch.object(User, "is_imis_admin", new_callable=PropertyMock, return_value=False), patch.object(
+            Individual, "get_queryset", side_effect=lambda qs, user: qs,
+        ):
+            page = self.service.preview(batch.pk)
+            self.assertEqual(page["items"], [])
+            self.assertEqual(page["deleted_individuals"], 2)
+            self.assertEqual(page["available_individuals"], 0)
+            self.assertFalse(page["has_next_page"])
+            _, exported = self.service.export(batch.pk)
+            self.assertEqual(self.workbook(exported)[INDIVIDUAL_SHEET].max_row, 1)
+            result = self.service.parse(content)
+            self.assertTrue(all("deleted" in row.errors[0] for row in result.rows))
+
+    def test_unrelated_scoped_reader_can_access_only_visible_saved_rows(self):
+        batch, _ = self.generate(target_count=2)
+        selected = list(iter_selection(batch))
+        reader = User.objects.create(username="partially-scoped-reader")
+        reader.has_perms = lambda perms: True
+        with patch.object(User, "is_imis_admin", new_callable=PropertyMock, return_value=False), patch.object(
+            Individual, "get_queryset", side_effect=lambda qs, user: qs.filter(pk=selected[1]["individual_uuid"]),
+        ):
+            page = IndividualValidationListService(reader).preview(batch.pk)
+        self.assertEqual(page["available_individuals"], 1)
+        self.assertEqual(page["inaccessible_individuals"], 1)
+        self.assertEqual(page["items"][0]["individual_uuid"], selected[1]["individual_uuid"])
+
+    def test_saved_reads_require_history_right_and_parse_still_requires_upload_right(self):
+        batch, content = self.generate(target_count=1)
+        self.actor.has_perms = lambda perms: list(perms) == ["958001"]
+        with self.assertRaises(PermissionDenied):
+            self.service.preview(batch.pk)
+        with self.assertRaises(PermissionDenied):
+            self.service.export(batch.pk)
+        self.actor.has_perms = lambda perms: list(perms) == ["958003"]
+        self.assertEqual(self.service.preview(batch.pk)["available_individuals"], 1)
+        self.service.export(batch.pk)
+        with self.assertRaises(PermissionDenied):
+            self.service.parse(content)
+        self.actor.has_perms = lambda perms: list(perms) == ["958002"]
+        self.assertFalse(self.service.parse(content).errors)
+
+    def test_geography_labels_and_identity_source_keys_are_saved_per_programme(self):
+        fields = [
+            {"column_name": "Business city", "location_type": "D"},
+            {"column_name": "Electoral ward", "location_type": "W"},
+            {"column_name": "Neighbourhood", "location_type": "V"},
+            {"column_name": "Identity number", "json_ext_key": "document_number"},
+            {"column_name": "Sex", "json_ext_key": "sex"},
+        ]
+        Individual.objects.filter(pk=self.standalone.pk).update(
+            json_ext={"document_number": "001234", "sex": "Female", "national_id": "WRONG", "gender": "WRONG"},
+        )
+        with patch.object(HouseholdValidationConfig, "individual_workbook_fields", {"umep": fields}):
+            batch, content = self.generate()
+        sheet = self.workbook(content)[INDIVIDUAL_SHEET]
+        headers = [cell.value for cell in sheet[1]]
+        for header in ("District", "TA", "GVH", "Village", "national_id", "gender"):
+            self.assertNotIn(header, headers)
+        row = next(row for row in iter_selection(batch) if row["individual_uuid"] == str(self.standalone.pk))
+        self.assertEqual(row["Identity number"], "001234")
+        self.assertEqual(row["Sex"], "Female")
+        self.assertEqual(row["Business city"], self.ta.name)
+        self.assertEqual(row["Electoral ward"], self.gvh.name)
+        self.assertEqual(row["Neighbourhood"], self.village.name)
+        _, exported = self.service.export(batch.pk)
+        self.assertEqual(list(sheet.values), list(self.workbook(exported)[INDIVIDUAL_SHEET].values))
+        self.assertFalse(self.service.parse(content).errors)
+        workbook = self.workbook(content)
+        workbook[INDIVIDUAL_SHEET].cell(2, headers.index("Business city") + 1, "Tampered")
+        parsed = self.service.parse(self.serialise(workbook))
+        self.assertTrue(any("protected field Business city" in error for error in parsed.rows[0].errors))
+
+    def test_empty_display_configuration_uses_only_core_and_editable_columns(self):
+        with patch.object(HouseholdValidationConfig, "individual_workbook_fields", {}):
+            _, content = self.generate(target_count=1)
+        self.assertEqual([cell.value for cell in self.workbook(content)[INDIVIDUAL_SHEET][1]],
+                         [*BASE_COLUMNS, *(col["column_name"] for col in COLUMNS)])
+        self.assertFalse(self.service.parse(content).errors)
+
+    def test_invalid_display_fields_fail_before_issuing_a_list(self):
+        for fields in ({}, [{"column_name": "City"}], [{"column_name": "City", "location_type": "X"}],
+                       [{"column_name": "City", "location_type": "D", "json_ext_key": "city"}],
+                       [{"column_name": "Decision", "json_ext_key": "foo"}],
+                       [{"column_name": "Turnover", "json_ext_key": "foo"}],
+                       [{"column_name": "ID", "json_ext_key": ""}]):
+            with self.subTest(fields=fields), patch.object(
+                HouseholdValidationConfig, "individual_workbook_fields", {"UMEP": fields},
+            ), self.assertRaises(ValidationError):
+                self.generate()
+        self.assertFalse(HouseholdValidationBatch.objects.exists())
+
+    def test_invalid_display_configuration_is_rejected_on_load_and_module_save(self):
+        from django.apps import apps
+
+        app = apps.get_app_config("household_validation")
+        for value in ([], {"": []}, {"UMEP": [], "umep": []},
+                      {"UMEP": [{"column_name": "City", "location_type": "INVALID"}]}):
+            with self.subTest(value=value):
+                with self.assertRaises(ValidationError):
+                    HouseholdValidationConfig._load_config({"individual_workbook_fields": value})
+                with self.assertRaises(ValidationError):
+                    app._validate_module_config(SimpleNamespace(_cfg={"individual_workbook_fields": value}))
+
+    def test_location_move_outside_user_scope_does_not_block_the_other_saved_rows(self):
+        batch, content = self.generate(target_count=2)
+        moved = next(iter_selection(batch))["individual_uuid"]
+        Individual.objects.filter(pk=moved).update(location=self.other)
+        with patch.object(Individual, "get_queryset", side_effect=lambda qs, user: qs.filter(location=self.village)):
+            page = self.service.preview(batch.pk)
+            self.assertEqual(page["available_individuals"], 1)
+            self.assertEqual(page["inaccessible_individuals"], 1)
+            _, exported = self.service.export(batch.pk)
+            self.assertEqual(self.workbook(exported)[INDIVIDUAL_SHEET].max_row, 2)
+            result = self.service.parse(content)
+            self.assertEqual(len(result.valid_rows), 1)
+            self.assertIn("outside your current access", result.rows[0].errors[0])
+
+    def test_selection_rows_are_immutable_and_exclude_upload_attempt_rows(self):
+        batch, content = self.generate(target_count=2)
+        expected = list(iter_selection(batch))
+        HouseholdValidationBatchRow(
+            batch=batch, row_number=2, upload_attempt_id=uuid4(), raw_row={"first_name": "Changed by upload"},
+            json_ext={"kind": "INDIVIDUAL_SELECTION"},
+        ).save(user=self.actor)
+        self.assertEqual(list(iter_selection(batch)), expected)
+        self.assertEqual(self.service.preview(batch.pk)["available_individuals"], 2)
+        _, exported = self.service.export(batch.pk)
+        self.assertEqual(list(self.workbook(content)[INDIVIDUAL_SHEET].values),
+                         list(self.workbook(exported)[INDIVIDUAL_SHEET].values))
+
+    def test_thousands_of_saved_rows_are_paged_in_sql_and_not_embedded_in_batch_json(self):
+        Individual.objects.bulk_create([
+            Individual(id=uuid4(), first_name=f"Large list {number}", last_name="Candidate", dob=self.standalone.dob,
+                       location=self.village, user_created=self.actor, user_updated=self.actor)
+            for number in range(2000)
+        ], batch_size=500)
+        batch, content = self.generate()
+        self.assertEqual(batch.json_ext["selected_individuals"], 2004)
+        self.assertNotIn("selection", batch.json_ext)
+        self.assertNotIn("Large list", str(batch.json_ext))
+        self.assertEqual(selection_rows(batch).count(), 2004)
+        self.assertEqual(self.workbook(content)[INDIVIDUAL_SHEET].max_row, 2005)
+        with CaptureQueriesContext(connection) as queries:
+            page = self.service.preview(batch.pk, first=2, offset=1000)
+        self.assertEqual(len(page["items"]), 2)
+        self.assertEqual(page["available_individuals"], 2004)
+        page_queries = [query["sql"] for query in queries
+                        if '"household_validation_householdvalidationbatchrow"."raw_row"' in query["sql"]]
+        self.assertEqual(len(page_queries), 1)
+        self.assertIn("LIMIT 2 OFFSET 1000", page_queries[0])
+
+    def test_legacy_issued_lists_keep_their_original_headers_and_read_policy(self):
+        legacy_fields = [{"column_name": name, "json_ext_key": name} for name in ("national_id", "gender")]
+        legacy_fields += [{"column_name": name, "location_type": level}
+                          for level, name in (("R", "District"), ("D", "TA"), ("W", "GVH"), ("V", "Village"))]
+        with patch.object(HouseholdValidationConfig, "individual_workbook_fields", {"UMEP": legacy_fields}):
+            batch, content = self.generate(target_count=2)
+        batch.json_ext["selection"] = list(iter_selection(batch))
+        batch.json_ext.pop("selection_storage")
+        batch.json_ext.pop("display_fields")
+        batch.save(user=self.actor)
+        selection_rows(batch).delete()
+        _, exported = self.service.export(batch.pk)
+        self.assertEqual(list(self.workbook(content)[INDIVIDUAL_SHEET].values),
+                         list(self.workbook(exported)[INDIVIDUAL_SHEET].values))
+        self.assertFalse(self.service.parse(content).errors)
+        Individual.objects.filter(pk=batch.json_ext["selection"][0]["individual_uuid"]).update(is_deleted=True)
+        self.assertEqual(self.service.preview(batch.pk)["available_individuals"], 1)
+        self.assertEqual(len(self.service.parse(content).valid_rows), 1)

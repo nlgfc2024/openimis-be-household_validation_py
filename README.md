@@ -441,11 +441,17 @@ the query is not a persisted list or cached snapshot.
 ### Saved individual lists and workbooks
 
 `generateIndividualValidationList` uses the individual programme's selection
-service and creates an existing validation batch containing the selected IDs,
-descriptive values, effective rule/source, columns (including option overrides),
-filters and counts in `batch.json_ext`. Preview and re-export read this snapshot;
-later registry or configuration edits do not change an issued list. The decision
-cells start blank, including when generating a list for revalidation.
+service and creates an existing validation batch. `batch.json_ext` stores the
+programme, effective rule/source, resolved editable columns (including option
+overrides), protected display-field definitions, filters and issued counts.
+Ordered identities and descriptive snapshots are stored in existing
+`HouseholdValidationBatchRow` records, marked `INDIVIDUAL_SELECTION` with a null
+`upload_attempt_id`; later upload attempts use different rows. Generation writes
+selection rows and their history in chunks of 500 within the same transaction.
+Preview and re-export read the saved values; later registry or configuration
+edits do not change those values. Decision cells start blank, including on
+revalidation lists. Previously issued lists with `json_ext.selection` remain
+readable using their original headers and saved values.
 
 ```graphql
 mutation {
@@ -459,20 +465,70 @@ mutation {
 ```graphql
 query SavedIndividualList($id: UUID!) {
   individualValidationList(batchId: $id, first: 20, offset: 0) {
-    batchId columns items eligibleIndividuals selectedIndividuals hasNextPage
+    batchId columns displayFields items eligibleIndividuals selectedIndividuals hasNextPage
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
   }
   individualValidationListExport(batchId: $id) {
     batchId fileName fileBase64 eligibleIndividuals selectedIndividuals
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
   }
 }
 ```
 
-`items` contains saved row dictionaries. Saved-list pagination uses saved counts
-without repeating live candidate selection/counting. Generation reuses right
-`958001`; reads/exports use the configured query right. Access to all selected
-individuals is rechecked against the current user's scope. Empty lists are
-accessible to their creator or an administrator. Historical household batches
-and their workbook APIs retain their existing behavior.
+`items` contains saved row dictionaries for individuals who are currently active
+and within the caller's access. Preview uses SQL `LIMIT`/`OFFSET` over those saved
+rows rather than loading every snapshot or constructing an in-memory ID list.
+It does not rerun candidate selection. `eligibleIndividuals` and
+`selectedIndividuals` remain the issued counts. Current availability is reported
+separately: `availableIndividuals`, soft-deleted `deletedIndividuals`, physically
+missing `missingIndividuals`, and active `inaccessibleIndividuals` outside the
+caller's scope. `hasNextPage` and offsets refer to the available rows. Re-export
+includes the same available subset in the saved order, with omission counts in
+both the GraphQL response and hidden workbook metadata. A deletion or scope
+change to one person does not block the remaining list.
+
+Generation requires `958001`. Saved preview and re-export require the configured
+history right (`958003`), while parsing requires the upload right (`958002`).
+A reader must have at least one currently accessible selected person, or be the
+batch creator or an administrator. A creator/admin with no accessible people may
+read omission counts and export an empty workbook, but cannot retrieve personal
+snapshots outside their current scope. Historical household batches and workbook
+APIs retain their existing behaviour.
+
+There is no confirmed production UMEP list-size estimate. The paging regression
+covers 2,004 selected individuals. With no `targetCount`, generation still selects
+all eligible individuals; use geographic filters or a target for operational
+workbook sizes. Export and parsing necessarily process the whole workbook in
+memory; this change bounds preview snapshot loading, not workbook memory use.
+
+Protected display columns are configured per programme through
+`individual_workbook_fields`. Each definition supplies `column_name` and exactly
+one of `json_ext_key` or `location_type` (`R`, `D`, `W` or `V`). Labels and identity
+source keys are deployment choices; the backend supplies no UMEP-specific labels.
+For example, a deployment storing cities at `R`, wards at `D` and neighbourhoods
+at `V` can use the following mapping. UMEP enrolment confirms `R` for city;
+the ward/neighbourhood types must be matched to the deployment registry:
+
+```json
+{
+  "individual_workbook_fields": {
+    "UMEP": [
+      {"column_name": "National ID", "json_ext_key": "national_id"},
+      {"column_name": "Gender", "json_ext_key": "gender"},
+      {"column_name": "City", "location_type": "R"},
+      {"column_name": "Ward", "location_type": "D"},
+      {"column_name": "Neighbourhood", "location_type": "V"}
+    ]
+  }
+}
+```
+
+The source keys and location types must match that deployment's registry. An
+absent programme entry means no extra protected display columns. These
+read-only fields are saved with the issued list and checked during parsing;
+editable business fields continue to use `program_specific_export_columns` and
+`export_column_options_overrides`. Duplicate or reserved display names, invalid
+sources and collisions with editable columns prevent list generation.
 
 The individual workbook contains protected batch/individual identity and
 descriptive fields, plus editable decisions, notes and configured programme
@@ -489,6 +545,12 @@ values, rejects unknown/mixed batches, foreign/duplicate IDs, unexpected/missing
 headers and formulas, and enforces applicable types, options, numeric bounds,
 required fields and dependencies. A blank decision skips programme-field
 validation and updates; a submitted invalid row has no parsed updates to apply.
+
+Current deletion and access checks are per submitted row: a deleted, missing or
+inaccessible individual receives a row error with no parsed updates, while other
+valid rows remain usable. A removed individual's saved protected fields are
+never returned through preview or re-export. Parsing itself creates no upload
+attempts or individual updates.
 
 ---
 

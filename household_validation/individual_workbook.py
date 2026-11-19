@@ -12,6 +12,7 @@ from openpyxl.utils.exceptions import InvalidFileException
 from openpyxl.worksheet.datavalidation import DataValidation
 
 from household_validation.excel import ExcelValidationListExporter
+from household_validation.individual_snapshots import iter_selection
 from household_validation.upload import _parse_extra_columns, _to_bytes_io
 from household_validation.verification import INDIVIDUAL_DECISIONS, parse_individual_decision
 
@@ -19,9 +20,10 @@ from household_validation.verification import INDIVIDUAL_DECISIONS, parse_indivi
 INDIVIDUAL_SHEET = "Individual Validation"
 METADATA_SHEET = "Validation Metadata"
 BASE_COLUMNS = (
-    "batch_id", "individual_uuid", "first_name", "last_name", "dob", "national_id", "gender",
-    "District", "TA", "GVH", "Village", "decision", "validation_notes",
+    "batch_id", "individual_uuid", "first_name", "last_name", "dob", "decision", "validation_notes",
 )
+LEGACY_BASE_COLUMNS = (*BASE_COLUMNS[:5], "national_id", "gender", "District", "TA", "GVH", "Village",
+                       *BASE_COLUMNS[5:])
 EDITABLE_COLUMNS = {"decision", "validation_notes"}
 
 
@@ -29,12 +31,42 @@ def normalise_header(value):
     return " ".join(str(value).replace("_", " ").split()).casefold()
 
 
-def validate_individual_columns(columns):
+def workbook_base_columns(batch):
+    fields = batch.json_ext.get("display_fields")
+    if fields is None:
+        return list(LEGACY_BASE_COLUMNS)
+    return [*BASE_COLUMNS[:5], *(col["column_name"] for col in fields), *BASE_COLUMNS[5:]]
+
+
+def validate_display_fields(fields):
+    if not isinstance(fields, list):
+        raise ValidationError("Individual workbook display fields must be a list.")
+    headers = {normalise_header(name) for name in BASE_COLUMNS}
+    for col in fields:
+        if not isinstance(col, dict) or not isinstance(col.get("column_name"), str) or not col["column_name"].strip():
+            raise ValidationError("Individual display fields require a non-empty column_name.")
+        header = normalise_header(col["column_name"])
+        if header in headers:
+            raise ValidationError("Individual display fields repeat or overwrite a reserved field.")
+        headers.add(header)
+        sources = set(col) & {"json_ext_key", "location_type"}
+        if len(sources) != 1 or set(col) - {"column_name", "json_ext_key", "location_type"}:
+            raise ValidationError("Individual display fields require exactly one json_ext_key or location_type.")
+        source = sources.pop()
+        if not isinstance(col[source], str) or not col[source].strip():
+            raise ValidationError("Individual display field sources must be non-empty strings.")
+        if source == "location_type" and col[source] not in ("R", "D", "W", "V"):
+            raise ValidationError("Individual display location_type must be R, D, W or V.")
+
+
+def validate_individual_columns(columns, display_fields=None):
     """Reject ambiguous/unsupported definitions before saving an issued list."""
     if not isinstance(columns, list):
         raise ValidationError("Individual workbook columns must be a list.")
     keys, targets = set(), set()
+    validate_display_fields(display_fields or [])
     headers = {normalise_header(c) for c in BASE_COLUMNS}
+    headers.update(normalise_header(col["column_name"]) for col in (display_fields or []))
     for col in columns:
         if not isinstance(col, dict):
             raise ValidationError("Each individual workbook column must be an object.")
@@ -79,10 +111,12 @@ def validate_individual_columns(columns):
 
 class IndividualValidationListExporter(ExcelValidationListExporter):
     """Reuse configurable-column formatting without household rows or decisions."""
-    def __init__(self, batch):
+    def __init__(self, batch, rows=None, availability=None):
         self.batch = batch
+        self.rows = rows
+        self.availability = availability or {}
         self.additional_columns = batch.json_ext["columns"]
-        self.columns = list(BASE_COLUMNS) + [col["column_name"] for col in self.additional_columns]
+        self.columns = workbook_base_columns(batch) + [col["column_name"] for col in self.additional_columns]
         self._column_by_key = {col["key"]: col for col in self.additional_columns}
         self._select_ranges = {}
         self._extra_unavailable_range = None
@@ -95,20 +129,22 @@ class IndividualValidationListExporter(ExcelValidationListExporter):
         for cell in sheet[1]:
             cell.font = Font(bold=True)
         editable = EDITABLE_COLUMNS | {c["column_name"] for c in self.additional_columns}
-        for row in self.batch.json_ext["selection"]:
+        for row in iter_selection(self.batch) if self.rows is None else self.rows:
             sheet.append([str(self.batch.pk) if header == "batch_id" else row.get(header) for header in self.columns])
             for cell, header in zip(sheet[sheet.max_row], self.columns):
                 # Values originating in registry data must remain literal text.
                 if isinstance(cell.value, str):
                     cell.data_type = "s"
                 cell.protection = Protection(locked=header not in editable)
-                if header in ("batch_id", "individual_uuid", "national_id"):
+                if isinstance(cell.value, str):
                     cell.number_format = "@"
         metadata = workbook.create_sheet(METADATA_SHEET)
         for key, value in (("batch_id", str(self.batch.pk)), ("subject", "INDIVIDUAL"),
                            ("benefit_plan_code", self.batch.json_ext["benefit_plan_code"])):
             metadata.append([key, value])
             metadata.cell(metadata.max_row, 2).data_type = "s"
+        for key, value in self.availability.items():
+            metadata.append([key, value])
         metadata.sheet_state = "hidden"
         self._write_extra_column_options(workbook)
         maximum = max(sheet.max_row, 2)
@@ -194,7 +230,8 @@ def parse_individual_validation_workbook(workbook, batch):
         if INDIVIDUAL_SHEET not in workbook.sheetnames:
             raise ValidationError(f"Missing worksheet: {INDIVIDUAL_SHEET}")
         columns = batch.json_ext["columns"]
-        expected = list(BASE_COLUMNS) + [col["column_name"] for col in columns]
+        base_columns = workbook_base_columns(batch)
+        expected = base_columns + [col["column_name"] for col in columns]
         canonical = {normalise_header(name): name for name in expected}
         sheet = workbook[INDIVIDUAL_SHEET]
         headers = {}
@@ -211,7 +248,7 @@ def parse_individual_validation_workbook(workbook, batch):
         result.errors.extend(exc.messages)
         return result
     registry = {col["key"]: col for col in columns}
-    selected = {row["individual_uuid"]: row for row in batch.json_ext["selection"]}
+    selected = {row["individual_uuid"]: row for row in iter_selection(batch)}
     identities = {}
     for number in range(2, sheet.max_row + 1):
         cells = {name: sheet.cell(number, index) for name, index in headers.items()}
@@ -231,7 +268,7 @@ def parse_individual_validation_workbook(workbook, batch):
         if original is None:
             row.errors.append(f"Row {number}: individual is not in the saved selection")
         else:
-            for name in BASE_COLUMNS:
+            for name in base_columns:
                 if name not in EDITABLE_COLUMNS | {"batch_id"} and (
                     _structural_value(values[name]) != _structural_value(original[name])
                 ):
