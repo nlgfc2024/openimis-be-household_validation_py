@@ -14,7 +14,7 @@ from openpyxl.worksheet.datavalidation import DataValidation
 from household_validation.excel import ExcelValidationListExporter
 from household_validation.individual_snapshots import iter_selection
 from household_validation.upload import _parse_extra_columns, _to_bytes_io
-from household_validation.verification import INDIVIDUAL_DECISIONS, parse_individual_decision
+from household_validation.verification import INDIVIDUAL_DECISIONS, VERIFIED, parse_individual_decision
 
 
 INDIVIDUAL_SHEET = "Individual Validation"
@@ -154,7 +154,9 @@ class IndividualValidationListExporter(ExcelValidationListExporter):
         letter = self._column_letter("decision")
         decision.add(f"{letter}2:{letter}{maximum}")
         for col in self.additional_columns:
-            self._apply_extra_column_validation(sheet, col, maximum)
+            # Blank answers must remain editable for NOT_VERIFIED decisions.
+            # Parsing enforces required fields for VERIFIED against the snapshot.
+            self._apply_extra_column_validation(sheet, {**col, "required": False}, maximum)
         self._apply_protection(sheet)
         self._autosize_columns(sheet)
         for header in ("batch_id", "individual_uuid"):
@@ -287,7 +289,9 @@ def parse_individual_validation_workbook(workbook, batch):
         except ValidationError as exc:
             row.errors.extend(f"Row {number}: {message}" for message in exc.messages)
         if row.decision is not None and not row.errors:
-            row.updates, errors = _parse_extra_columns(number, values, registry)
+            row.updates, errors = _parse_extra_columns(
+                number, values, registry, require_fields=row.decision == VERIFIED,
+            )
             row.errors.extend(errors)
             if any(isinstance(value, float) and not math.isfinite(value) for value in row.updates.values()):
                 row.errors.append(f"Row {number}: numeric value is out of range")
