@@ -1212,7 +1212,7 @@ class ProgramBasedGenerationIntegrationTest(TestCase):
 
 
 class HotspotAndMicroCatchmentResolutionTest(TestCase):
-    @patch("household_validation.services.Hotspot.objects.filter")
+    @patch("household_validation.geography.Hotspot.objects.filter")
     def test_resolve_hotspot_filters_by_uuid_code_and_validity(self, filter_mock):
         filter_mock.return_value.first.return_value = "hotspot-instance"
         service = EligibleHouseholdSelectionService()
@@ -1227,7 +1227,7 @@ class HotspotAndMicroCatchmentResolutionTest(TestCase):
         service = EligibleHouseholdSelectionService()
         self.assertIsNone(service._resolve_hotspot(None, None))
 
-    @patch("household_validation.services.MicroCatchment.objects.filter")
+    @patch("household_validation.geography.MicroCatchment.objects.filter")
     def test_resolve_micro_catchment_filters_by_uuid_code_and_validity(self, filter_mock):
         filter_mock.return_value.first.return_value = "catchment-instance"
         service = EligibleHouseholdSelectionService()
@@ -1304,7 +1304,7 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
 
         with (
             patch.object(service, "_resolve_micro_catchment", return_value=micro_catchment) as resolve_mock,
-            patch("household_validation.services.Hotspot.objects.filter", return_value=hotspot_queryset),
+            patch("household_validation.geography.Hotspot.objects.filter", return_value=hotspot_queryset),
         ):
             result = service._apply_location_filters(queryset, catchment_code="MC01")
 
@@ -1325,7 +1325,7 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
         micro_catchment.gvhs.filter.return_value.values_list.return_value = ["GVH01"]
 
         with patch(
-            "household_validation.services.Hotspot.objects.filter",
+            "household_validation.geography.Hotspot.objects.filter",
             return_value=hotspot_queryset,
         ):
             location_filter = service._micro_catchment_location_filter(micro_catchment)
