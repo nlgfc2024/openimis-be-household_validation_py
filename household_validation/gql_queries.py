@@ -35,6 +35,24 @@ class IndividualValidationSavedListGQLType(graphene.ObjectType):
     has_next_page = graphene.Boolean()
 
 
+class IndividualValidationAttemptsGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    attempts = graphene.List(GenericScalar)
+
+
+class IndividualValidationAttemptRowsGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    items = graphene.List(GenericScalar)
+
+
+class IndividualValidationErrorReportGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    error_count = graphene.Int()
+
+
 class HouseholdValidationProjectGQLType(graphene.ObjectType):
     id = graphene.String()
     name = graphene.String()

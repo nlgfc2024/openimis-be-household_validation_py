@@ -490,6 +490,61 @@ headers and formulas, and enforces applicable types, options, numeric bounds,
 required fields and dependencies. A blank decision skips programme-field
 validation and updates; a submitted invalid row has no parsed updates to apply.
 
+### Applying individual decisions
+
+`uploadIndividualValidationList` requires `958002` and a known generated individual
+batch. It uses the saved rule, columns and selected identities, then rechecks each
+person's current access, deletion state, source, active-household membership and
+saved geography. It does not reapply `excludeValidated` during upload, so retries
+and corrections remain possible after an accepted decision.
+
+```graphql
+mutation ValidateIndividuals($file: String!) {
+  uploadIndividualValidationList(fileBase64: $file, dryRun: true, sourceFileName: "checked.xlsx") {
+    batchId dryRun status rowsRead rowsApplied rowsSkipped errors errorMessages
+    wouldUpdate individualsUpdated uploadAttemptId
+  }
+}
+```
+
+Dry run performs parsing and current eligibility checks without changing an
+individual, batch, row or history record. `wouldUpdate` predicts changed individuals;
+`individualsUpdated` is zero in a dry run and counts actual writes after commit.
+Submit again with `dryRun: false` to commit; current state is checked again.
+
+Each committed upload uses one transaction and a new `uploadAttemptId`. Valid
+submitted decisions are recorded as APPLIED even if the individual already has
+the same values; blank decisions are SKIPPED. Expected row errors are recorded
+as ERROR while other valid rows apply, producing PARTIAL_SUCCESS. All-error files
+are FAILED; a file with no errors is PROCESSED. Unknown batches are rejected and
+never created by upload. Unexpected write failures roll back the entire attempt.
+
+Decisions update `Individual.json_ext.validation_status` directly, together with
+valid configured fields and supplied notes. Unrelated JSON, household status,
+membership and primary workers are preserved. An identical retry creates an audit
+attempt and result rows without an unnecessary individual save/history entry.
+Corrections create new attempts without replacing earlier decisions. Existing
+Individual history and validation batch rows supply the audit trail.
+
+```graphql
+query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
+  individualValidationAttempts(batchId: $batch) { count attempts }
+  individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt) { count items }
+  individualValidationErrorReport(batchId: $batch, uploadAttemptId: $attempt) {
+    fileName fileBase64 errorCount
+  }
+}
+```
+
+Attempt history/rows require `958003`; the attempt-specific CSV error report requires
+`958004`. No new rights are introduced. Batch creators, administrators or users
+with current access to selected individuals may access attempt metadata, subject
+to those rights. Personal row data is returned only for individuals currently
+visible to the reader; other rows have `redacted: true`, no individual ID and empty
+raw/JSON values. CSV reports use the saved programme columns and the same redaction.
+Deleted or inaccessible people produce individual row errors rather than blocking
+processing of the rest of an authorized upload.
+
 ---
 
 ## Program-Specific Export Columns
