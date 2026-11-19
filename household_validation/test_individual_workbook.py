@@ -44,7 +44,7 @@ COLUMNS = [
 DISPLAY_FIELDS = [
     {"column_name": "national_id", "json_ext_key": "national_id"},
     {"column_name": "gender", "json_ext_key": "gender"},
-    {"column_name": "City", "location_type": "D"},
+    {"column_name": "City", "location_type": "R"},
     {"column_name": "Ward", "location_type": "W"},
     {"column_name": "Neighbourhood", "location_type": "V"},
 ]
@@ -155,12 +155,18 @@ class IndividualWorkbookTests(TestCase):
         self.assertIn("LIMIT 1 OFFSET 1", page_queries[1])
 
     def test_workbook_has_individual_fields_decisions_and_editable_configured_columns(self):
-        _, content = self.generate(target_count=1)
+        batch, content = self.generate(target_count=1)
         workbook = self.workbook(content)
         sheet = workbook[INDIVIDUAL_SHEET]
         headers = [cell.value for cell in sheet[1]]
         self.assertNotIn("group_uuid", headers)
         self.assertNotIn("primary_worker", headers)
+        self.assertTrue({"City", "Ward", "Neighbourhood"}.issubset(headers))
+        self.assertTrue({"District", "TA", "GVH", "Village"}.isdisjoint(headers))
+        saved = next(iter_selection(batch))
+        self.assertEqual(saved["City"], self.district.name)
+        self.assertEqual(saved["Ward"], self.gvh.name)
+        self.assertEqual(saved["Neighbourhood"], self.village.name)
         self.assertTrue(sheet.protection.sheet)
         for header in ("decision", "validation_notes", "Turnover"):
             self.assertFalse(sheet.cell(2, headers.index(header) + 1).protection.locked)
