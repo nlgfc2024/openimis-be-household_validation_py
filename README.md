@@ -507,8 +507,11 @@ Protected display columns are configured per programme through
 `individual_workbook_fields`. Each definition supplies `column_name` and exactly
 one of `json_ext_key` or `location_type` (`R`, `D`, `W` or `V`). Labels and identity
 source keys are deployment choices; the backend supplies no UMEP-specific labels.
-UMEP uses `R` for City, `W` (GVH) for Ward and `V` for Neighbourhood, with no
-UMEP equivalent for `D` (TA). Its deployment configuration is:
+UMEP maps `R` to City, `D` (TA) to Constituency, `W` (GVH) to Ward and `V`
+to Neighbourhood. The individual validation workbook intentionally omits
+Constituency: its configured geography columns are City, Ward and Neighbourhood.
+This workbook subset does not remove `D` from the location hierarchy. Its
+workbook display configuration is:
 
 ```json
 {
