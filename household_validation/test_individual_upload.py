@@ -84,6 +84,34 @@ class IndividualValidationUploadTests(TestCase):
         self.assertFalse(batch.rows.filter(upload_attempt_id__isnull=False).exists())
         self.assertEqual(self.uploader.history(batch.pk), [])
 
+    def test_not_verified_without_business_answers_preserves_existing_values(self):
+        batch, content = self.generate(target_count=1)
+        workbook = self.workbook(content)
+        sheet = workbook[INDIVIDUAL_SHEET]
+        headers = {cell.value: cell.column for cell in sheet[1]}
+        selected = next(iter_selection(batch))["individual_uuid"]
+        original = {"turnover": 40, "owns": "Yes", "kind": "Retail", "unrelated": "keep"}
+        Individual.objects.filter(pk=selected).update(json_ext=original)
+        sheet.cell(2, headers["decision"], " not_verified ")
+        sheet.cell(2, headers["validation_notes"], "Business could not be reached")
+        content = self.serialise(workbook)
+        dry_run = self.uploader.upload(content, dry_run=True)
+        self.assertEqual(dry_run["errors"], 0)
+        self.assertEqual(dry_run["would_update"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, original)
+        result = self.uploader.upload(content)
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(result["individuals_not_verified"], 1)
+        self.assertEqual(result["rows_applied"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {
+            **original, "validation_status": "NOT_VERIFIED", "validation_notes": "Business could not be reached",
+        })
+        sheet.cell(2, headers["decision"], "VERIFIED")
+        rejected = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(rejected["rows_applied"], 0)
+        self.assertEqual(rejected["errors"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext["validation_status"], "NOT_VERIFIED")
+
     def test_partial_success_logs_invalid_row_and_applies_the_rest(self):
         batch, workbook, headers = self.make_upload()
         workbook[INDIVIDUAL_SHEET].cell(3, headers["Turnover"], -1)
