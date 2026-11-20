@@ -8,6 +8,7 @@ from household_validation.apps import HouseholdValidationConfig
 from household_validation.excel import ExcelValidationListExporter
 from household_validation.gql_permissions import require_permissions
 from household_validation.models import HouseholdValidationBatch
+from household_validation.individual_lists import IndividualValidationListService
 from household_validation.selection import (
     female_headed_percentage,
     reserve_percentage,
@@ -31,6 +32,62 @@ class HouseholdValidationVillageBreakdownGQLType(graphene.ObjectType):
     selected_households = graphene.Int()
     selected_individuals = graphene.Int()
     reserve_households = graphene.Int()
+
+
+class IndividualValidationGenerateResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    available_individuals = graphene.Int()
+    deleted_individuals = graphene.Int()
+    missing_individuals = graphene.Int()
+    inaccessible_individuals = graphene.Int()
+    generated_at = graphene.DateTime()
+
+
+def individual_workbook_result(batch, content):
+    counts = getattr(batch, "_individual_read_counts", {
+        "available_individuals": batch.json_ext["selected_individuals"],
+        "deleted_individuals": 0, "missing_individuals": 0, "inaccessible_individuals": 0,
+    })
+    return IndividualValidationGenerateResultGQLType(
+        batch_id=batch.pk, file_name=f"individual_validation_{batch.pk}.xlsx",
+        file_base64=base64.b64encode(content).decode("ascii"), generated_at=batch.generated_at,
+        eligible_individuals=batch.json_ext["eligible_individuals"],
+        selected_individuals=batch.json_ext["selected_individuals"],
+        **counts,
+    )
+
+
+class GenerateIndividualValidationListMutation(graphene.Mutation):
+    Output = IndividualValidationGenerateResultGQLType
+
+    class Arguments:
+        benefit_plan_code = graphene.String(required=True)
+        target_count = graphene.Int()
+        exclude_validated = graphene.Boolean(default_value=False)
+        region_id = graphene.Int()
+        region_code = graphene.String()
+        district_id = graphene.Int()
+        district_code = graphene.String()
+        ta_id = graphene.Int()
+        ta_code = graphene.String()
+        ta_codes = graphene.List(graphene.String)
+        gvh_codes = graphene.List(graphene.String)
+        village_id = graphene.Int()
+        village_code = graphene.String()
+        village_codes = graphene.List(graphene.String)
+        hotspot_id = graphene.String()
+        hotspot_code = graphene.String()
+        catchment_id = graphene.String()
+        catchment_code = graphene.String()
+
+    @classmethod
+    def mutate(cls, root, info, **data):
+        batch, content = IndividualValidationListService(info.context.user).generate(**data)
+        return individual_workbook_result(batch, content)
 
 
 class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):

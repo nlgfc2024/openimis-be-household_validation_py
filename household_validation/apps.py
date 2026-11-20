@@ -145,6 +145,10 @@ DEFAULT_CONFIG = {
     # - depends_on (optional): {key, equals} -- the cell is only
     #   editable/checked when the referenced column's value on that row
     #   equals `equals`.
+    # Protected individual workbook fields, keyed by programme. Each entry has
+    # column_name and exactly one of json_ext_key or location_type (R/D/W/V).
+    # Deployments choose their own identity keys and geography labels.
+    "individual_workbook_fields": {},
     "program_specific_export_columns": {
         "PWP": [
             {
@@ -208,6 +212,7 @@ class HouseholdValidationConfig(AppConfig):
     group_update_perms = None
     program_eligibility_rules = None
     program_specific_export_columns = None
+    individual_workbook_fields = None
     export_column_options_overrides = None
 
     @classmethod
@@ -215,10 +220,12 @@ class HouseholdValidationConfig(AppConfig):
         """
         Load config fields that match current AppConfig class fields.
         """
-        from household_validation.programmes import programme_rules
+        from household_validation.programmes import individual_workbook_fields, programme_rules
 
         if "program_eligibility_rules" in cfg:
             programme_rules(cfg["program_eligibility_rules"])
+        if "individual_workbook_fields" in cfg:
+            individual_workbook_fields(cfg["individual_workbook_fields"])
         stale_keys = [key for key in RETIRED_CONFIG_KEYS if key in cfg]
         if stale_keys:
             logger.warning(
@@ -240,7 +247,7 @@ class HouseholdValidationConfig(AppConfig):
 
     def _validate_module_config(self, instance):
         """Reject invalid rules on save, before the next application restart."""
-        from household_validation.programmes import programme_rules
+        from household_validation.programmes import individual_workbook_fields, programme_rules
 
         saved = instance._cfg
         if not isinstance(saved, dict):
@@ -248,6 +255,7 @@ class HouseholdValidationConfig(AppConfig):
         config = {**DEFAULT_CONFIG, **saved}
         try:
             programme_rules(config["program_eligibility_rules"])
+            individual_workbook_fields(config["individual_workbook_fields"])
         except ValidationError as exc:
             raise ValidationError({"config": exc.messages}) from exc
 

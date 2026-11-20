@@ -402,8 +402,11 @@ configuration registry and again at startup.
 The individual decision contract is **VERIFIED / NOT_VERIFIED only**. Leading and
 trailing whitespace is trimmed and case normalised. Blank/null decisions skip the
 whole row without changes; unsupported values, including REJECTED and Yes/No, are
-invalid. Submitted decisions must satisfy applicable configured required fields,
-dependencies, types, options and numeric bounds before row updates. Household
+invalid. VERIFIED decisions must satisfy applicable configured required fields.
+NOT_VERIFIED decisions allow blank business answers (for example, when a business
+does not exist or a person cannot be reached); omitted answers preserve stored
+values, subject to the configured dependency rules. Supplied answers for either
+decision must satisfy dependencies, types, options and numeric bounds. Household
 Primary Worker/status rules are unchanged.
 
 The read-only queries below reuse right `958001`. They expose programme metadata
@@ -437,6 +440,142 @@ null, blank and unsupported statuses remain candidates. The default is `false`
 so existing calls can still select people for revalidation. This is an explicit
 status filter, not a date cutoff. Live candidate counts are computed per request;
 the query is not a persisted list or cached snapshot.
+
+### Saved individual lists and workbooks
+
+`generateIndividualValidationList` uses the individual programme's selection
+service and creates an existing validation batch. `batch.json_ext` stores the
+programme, effective rule/source, resolved editable columns (including option
+overrides), protected display-field definitions, filters and issued counts.
+Ordered identities and descriptive snapshots are stored in existing
+`HouseholdValidationBatchRow` records, marked `INDIVIDUAL_SELECTION` with a null
+`upload_attempt_id`; later upload attempts use different rows. Generation writes
+selection rows and their history in chunks of 500 within the same transaction.
+Preview and re-export read the saved values; later registry or configuration
+edits do not change those values. Decision cells start blank, including on
+revalidation lists.
+
+Editable business cells also start blank, regardless of existing registry
+answers. Only deliberately supplied answers are parsed into updates; issuing a
+list does not pre-fill old values that could later overwrite newer registry
+changes or clear dependants. VERIFIED requires fresh applicable answers, while
+NOT_VERIFIED can leave business cells blank to preserve current values. An
+explicit dependency answer may still clear an inapplicable dependent field.
+Protected descriptive columns continue to carry their configured saved values.
+
+Candidate identities are materialized once for selection and issued counts.
+Snapshots are built from those selected IDs rather than re-evaluating eligibility.
+If a selected identity disappears before its snapshot can be saved, generation
+rolls back and asks the caller to generate again instead of substituting people
+or silently shortening the issued list.
+
+```graphql
+mutation {
+  generateIndividualValidationList(
+    benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
+    excludeValidated: true, targetCount: 100
+  ) { batchId fileName fileBase64 eligibleIndividuals selectedIndividuals generatedAt }
+}
+```
+
+```graphql
+query SavedIndividualList($id: UUID!) {
+  individualValidationList(batchId: $id, first: 20, offset: 0) {
+    batchId columns displayFields items eligibleIndividuals selectedIndividuals hasNextPage
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
+  }
+  individualValidationListExport(batchId: $id) {
+    batchId fileName fileBase64 eligibleIndividuals selectedIndividuals
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
+  }
+}
+```
+
+`items` contains saved row dictionaries for individuals who are currently active
+and within the caller's access. Preview uses SQL `LIMIT`/`OFFSET` over those saved
+rows rather than loading every snapshot or constructing an in-memory ID list.
+It does not rerun candidate selection. `eligibleIndividuals` and
+`selectedIndividuals` remain the issued counts. Current availability is reported
+separately: `availableIndividuals`, soft-deleted `deletedIndividuals`, physically
+missing `missingIndividuals`, and active `inaccessibleIndividuals` outside the
+caller's scope. `hasNextPage` and offsets refer to the available rows. Re-export
+includes the same available subset in the saved order, with omission counts in
+both the GraphQL response and hidden workbook metadata. A deletion or scope
+change to one person does not block the remaining list.
+
+Generation requires `958001`. Saved preview and re-export require the configured
+history right (`958003`), while parsing requires the upload right (`958002`).
+A reader must have at least one currently accessible selected person, or be the
+batch creator or an administrator. A creator/admin with no accessible people may
+read omission counts and export an empty workbook, but cannot retrieve personal
+snapshots outside their current scope. Historical household batches and workbook
+APIs retain their existing behaviour.
+
+There is no confirmed production UMEP list-size estimate. The paging regression
+covers 2,004 selected individuals. With no `targetCount`, generation still selects
+all eligible individuals; use geographic filters or a target for operational
+workbook sizes. Export and parsing necessarily process the whole workbook in
+memory; this change bounds preview snapshot loading, not workbook memory use.
+
+Protected display columns are configured per programme through
+`individual_workbook_fields`. Each definition supplies `column_name` and exactly
+one of `json_ext_key` or `location_type` (`R`, `D`, `W` or `V`). Labels and identity
+source keys are deployment choices; the backend supplies no UMEP-specific labels.
+UMEP maps `R` to City, `D` (TA) to Constituency, `W` (GVH) to Ward and `V`
+to Neighbourhood. The individual validation workbook intentionally omits
+Constituency: its configured geography columns are City, Ward and Neighbourhood.
+This workbook subset does not remove `D` from the location hierarchy. Its
+workbook display configuration is:
+
+```json
+{
+  "individual_workbook_fields": {
+    "UMEP": [
+      {"column_name": "National ID", "json_ext_key": "national_id"},
+      {"column_name": "Gender", "json_ext_key": "gender"},
+      {"column_name": "City", "location_type": "R"},
+      {"column_name": "Ward", "location_type": "W"},
+      {"column_name": "Neighbourhood", "location_type": "V"}
+    ]
+  }
+}
+```
+
+The source keys and location types must match that deployment's registry. An
+absent programme entry means no extra protected display columns. These
+read-only fields are saved with the issued list and checked during parsing;
+editable business fields continue to use `program_specific_export_columns` and
+`export_column_options_overrides`. Duplicate or reserved display names, invalid
+sources and collisions with editable columns prevent list generation.
+
+The individual workbook contains protected batch/individual identity and
+descriptive fields, plus editable decisions, notes and configured programme
+columns. It does not require a household, household head or Primary Worker.
+`IndividualValidationListService(user).parse(bytes_or_file)` requires the upload
+right (`958002`) and an existing accessible individual batch. It returns global
+file errors and per-row errors/raw values, decisions, notes and parsed JSON-field
+updates; it does **not** save upload attempts or apply updates. `valid_rows` is
+empty on global file errors and otherwise excludes erroneous rows; a valid row
+with `decision is None` must be skipped without applying any fields.
+
+Parsing uses only the batch's saved columns and identity set, checks protected
+values, rejects unknown/mixed batches, foreign/duplicate IDs, unexpected/missing
+headers and formulas, and enforces applicable types, options, numeric bounds,
+dependencies and required fields for VERIFIED decisions. NOT_VERIFIED decisions
+may omit business answers. Excel permits blank business cells; parsing enforces
+the decision-specific requiredness. A blank decision skips programme-field
+validation and updates; a submitted invalid row has no parsed updates to apply.
+
+Current deletion and access checks are per submitted row: a deleted, missing or
+inaccessible individual receives a row error with no parsed updates, while other
+valid rows remain usable. A removed individual's saved protected fields are
+never returned through preview or re-export. Parsing itself creates no upload
+attempts or individual updates.
+
+Household uploads reject an existing batch tagged INDIVIDUAL, including deleted
+or unsupported individual-list formats. This applies to dry run and commit,
+before household attempt rows or batch status can be written. Legacy household
+batches retain their existing upload behaviour.
 
 ---
 

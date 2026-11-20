@@ -57,7 +57,9 @@ class EligibleIndividualSelectionService(ValidationGeographyMixin):
     def select(self, benefit_plan_code, target_count=None, **geography):
         if target_count is not None and (type(target_count) is not int or target_count < 0):
             raise ValidationError("target_count must be a non-negative integer.")
-        queryset = self.candidates(benefit_plan_code, **geography)
-        eligible_count = queryset.count()
-        selected_count = eligible_count if target_count is None else min(target_count, eligible_count)
-        return IndividualSelectionResult(queryset[:selected_count], eligible_count, selected_count)
+        eligible_ids = list(self.candidates(benefit_plan_code, **geography).values_list("pk", flat=True))
+        selected_ids = eligible_ids if target_count is None else eligible_ids[:target_count]
+        # Counts and identity choice come from one evaluation. Later registry
+        # edits cannot replace selected people by re-evaluating eligibility.
+        individuals = Individual.objects.filter(pk__in=selected_ids).order_by("pk")
+        return IndividualSelectionResult(individuals, len(eligible_ids), len(selected_ids))

@@ -275,12 +275,14 @@ def _dependency_state(col, values, column_registry):
     return "not_applicable", dep_col
 
 
-def _parse_extra_columns(row_number, values, column_registry):
+def _parse_extra_columns(row_number, values, column_registry, *, require_fields=True):
     """Generic parser for household_validation.apps's
     ``program_specific_export_columns`` column definitions: validates each
     configured column's cell against its ``type``/``options``/``min``/``max``
     and ``required``/``depends_on`` rules, producing the ``Individual.json_ext``
     updates for valid rows (see ``UploadedValidationRow.business_updates``).
+    ``require_fields=False`` allows blank answers for an individual NOT_VERIFIED
+    decision, while preserving validation of supplied values and dependencies.
     """
     updates = {}
     errors = []
@@ -309,7 +311,7 @@ def _parse_extra_columns(row_number, values, column_registry):
             continue
 
         if raw_value is None:
-            if col.get("required"):
+            if require_fields and col.get("required"):
                 errors.append(f"Row {row_number}: {col['column_name']} is required")
             continue
 
