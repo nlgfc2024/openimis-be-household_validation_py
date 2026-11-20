@@ -22,8 +22,6 @@ METADATA_SHEET = "Validation Metadata"
 BASE_COLUMNS = (
     "batch_id", "individual_uuid", "first_name", "last_name", "dob", "decision", "validation_notes",
 )
-LEGACY_BASE_COLUMNS = (*BASE_COLUMNS[:5], "national_id", "gender", "District", "TA", "GVH", "Village",
-                       *BASE_COLUMNS[5:])
 EDITABLE_COLUMNS = {"decision", "validation_notes"}
 
 
@@ -32,9 +30,7 @@ def normalise_header(value):
 
 
 def workbook_base_columns(batch):
-    fields = batch.json_ext.get("display_fields")
-    if fields is None:
-        return list(LEGACY_BASE_COLUMNS)
+    fields = batch.json_ext["display_fields"]
     return [*BASE_COLUMNS[:5], *(col["column_name"] for col in fields), *BASE_COLUMNS[5:]]
 
 

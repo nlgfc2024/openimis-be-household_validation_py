@@ -453,8 +453,7 @@ Ordered identities and descriptive snapshots are stored in existing
 selection rows and their history in chunks of 500 within the same transaction.
 Preview and re-export read the saved values; later registry or configuration
 edits do not change those values. Decision cells start blank, including on
-revalidation lists. Previously issued lists with `json_ext.selection` remain
-readable using their original headers and saved values.
+revalidation lists.
 
 ```graphql
 mutation {
