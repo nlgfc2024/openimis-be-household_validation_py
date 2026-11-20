@@ -11,6 +11,7 @@ from household_validation.excel import (
     is_primary_worker_rejection,
 )
 from household_validation.gql_mutations import (
+    UploadIndividualValidationListMutation,
     GenerateIndividualValidationListMutation,
     IndividualValidationGenerateResultGQLType,
     individual_workbook_result,
@@ -18,6 +19,10 @@ from household_validation.gql_mutations import (
     UploadHouseholdValidationListMutation,
 )
 from household_validation.gql_queries import (
+    IndividualValidationAttemptsGQLType,
+    IndividualValidationBatchesGQLType,
+    IndividualValidationAttemptRowsGQLType,
+    IndividualValidationErrorReportGQLType,
     IndividualValidationSavedListGQLType,
     ValidationProgrammeGQLType,
     IndividualValidationCandidatesGQLType,
@@ -31,6 +36,7 @@ from household_validation.gql_queries import (
 )
 from household_validation.individual_selection import EligibleIndividualSelectionService
 from household_validation.individual_lists import IndividualValidationListService
+from household_validation.individual_upload import IndividualValidationUploadService
 from household_validation.programmes import configured_programmes
 from household_validation.models import (
     HouseholdValidationBatch,
@@ -95,6 +101,22 @@ def validation_filter_args():
 
 
 class Query(graphene.ObjectType):
+    individual_validation_batches = graphene.Field(
+        IndividualValidationBatchesGQLType,
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
+    )
+    individual_validation_attempts = graphene.Field(
+        IndividualValidationAttemptsGQLType, batch_id=graphene.UUID(required=True),
+    )
+    individual_validation_attempt_rows = graphene.Field(
+        IndividualValidationAttemptRowsGQLType, batch_id=graphene.UUID(required=True),
+        upload_attempt_id=graphene.UUID(required=True),
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
+    )
+    individual_validation_error_report = graphene.Field(
+        IndividualValidationErrorReportGQLType, batch_id=graphene.UUID(required=True),
+        upload_attempt_id=graphene.UUID(required=True),
+    )
     individual_validation_list = graphene.Field(
         IndividualValidationSavedListGQLType, batch_id=graphene.UUID(required=True),
         first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
@@ -147,6 +169,27 @@ class Query(graphene.ObjectType):
         HouseholdValidationErrorReportGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
     )
+
+    def resolve_individual_validation_batches(parent, info, first=20, offset=0):
+        return IndividualValidationUploadService(info.context.user).batches(first=first, offset=offset)
+
+    def resolve_individual_validation_attempts(parent, info, batch_id):
+        attempts = IndividualValidationUploadService(info.context.user).history(batch_id)
+        return IndividualValidationAttemptsGQLType(attempts=attempts, count=len(attempts))
+
+    def resolve_individual_validation_attempt_rows(parent, info, batch_id, upload_attempt_id, first=20, offset=0):
+        page = IndividualValidationUploadService(info.context.user).attempt_rows(
+            batch_id, upload_attempt_id, first=first, offset=offset,
+        )
+        return IndividualValidationAttemptRowsGQLType(**page)
+
+    def resolve_individual_validation_error_report(parent, info, batch_id, upload_attempt_id):
+        content, count = IndividualValidationUploadService(info.context.user).error_report(batch_id, upload_attempt_id)
+        return IndividualValidationErrorReportGQLType(
+            batch_id=batch_id, upload_attempt_id=upload_attempt_id, error_count=count,
+            file_name=f"individual_validation_errors_{batch_id}_{upload_attempt_id}.csv",
+            file_base64=base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        )
 
     def resolve_individual_validation_list(parent, info, batch_id, first=20, offset=0):
         return IndividualValidationListService(info.context.user).preview(batch_id, first, offset)
@@ -321,6 +364,7 @@ class Query(graphene.ObjectType):
 
 
 class Mutation(graphene.ObjectType):
+    upload_individual_validation_list = UploadIndividualValidationListMutation.Field()
     generate_individual_validation_list = GenerateIndividualValidationListMutation.Field()
     generate_household_validation_list = GenerateHouseholdValidationListMutation.Field()
     upload_household_validation_list = UploadHouseholdValidationListMutation.Field()

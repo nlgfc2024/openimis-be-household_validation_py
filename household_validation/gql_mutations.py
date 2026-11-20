@@ -9,6 +9,7 @@ from household_validation.excel import ExcelValidationListExporter
 from household_validation.gql_permissions import require_permissions
 from household_validation.models import HouseholdValidationBatch
 from household_validation.individual_lists import IndividualValidationListService
+from household_validation.individual_upload import IndividualValidationUploadService
 from household_validation.selection import (
     female_headed_percentage,
     reserve_percentage,
@@ -45,6 +46,44 @@ class IndividualValidationGenerateResultGQLType(graphene.ObjectType):
     missing_individuals = graphene.Int()
     inaccessible_individuals = graphene.Int()
     generated_at = graphene.DateTime()
+
+
+class IndividualValidationUploadResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
+    dry_run = graphene.Boolean()
+    status = graphene.String()
+    rows_read = graphene.Int()
+    rows_applied = graphene.Int()
+    rows_skipped = graphene.Int()
+    errors = graphene.Int()
+    error_messages = graphene.List(graphene.String)
+    individuals_verified = graphene.Int()
+    individuals_not_verified = graphene.Int()
+    individuals_updated = graphene.Int()
+    would_update = graphene.Int()
+
+
+class UploadIndividualValidationListMutation(graphene.Mutation):
+    Output = IndividualValidationUploadResultGQLType
+
+    class Arguments:
+        file_base64 = graphene.String(required=True)
+        dry_run = graphene.Boolean(default_value=False)
+        source_file_name = graphene.String()
+
+    @classmethod
+    def mutate(cls, root, info, file_base64, dry_run=False, source_file_name=None):
+        require_permissions(info.context.user,
+                            HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+                            error_class=PermissionDenied)
+        try:
+            content = base64.b64decode(file_base64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValidationError("Invalid base64 validation workbook.") from exc
+        return IndividualValidationUploadResultGQLType(**IndividualValidationUploadService(info.context.user).upload(
+            content, dry_run=dry_run, source_file_name=source_file_name,
+        ))
 
 
 def individual_workbook_result(batch, content):

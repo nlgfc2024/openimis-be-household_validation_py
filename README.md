@@ -577,6 +577,129 @@ or unsupported individual-list formats. This applies to dry run and commit,
 before household attempt rows or batch status can be written. Legacy household
 batches retain their existing upload behaviour.
 
+### Applying individual decisions
+
+`uploadIndividualValidationList` requires `958002` and a known generated individual
+batch. It uses the saved rule, columns and selected identities, then rechecks each
+person's current access, deletion state, source, active-household membership and
+saved geography. It does not reapply `excludeValidated` during upload, so retries
+and corrections remain possible after an accepted decision.
+
+Upload intersects every saved geographic scope. A matching neighbourhood does
+not bypass the saved Ward, Constituency or City scope if a location or its
+parents have moved since generation. For UMEP, Constituency is the existing
+`D`/TA level: saved `taId`, `taCode` or `taCodes` filters are checked through the
+current parent chain even though the workbook omits the Constituency column.
+ID/code alternatives within the same level retain their existing matching
+behaviour. Dry runs and committed uploads perform the same geographic checks;
+an out-of-scope individual receives a row error while other valid rows proceed.
+A City-only batch does not impose an additional Constituency restriction, so a
+move between constituencies within that City can remain valid. Uploading does
+not change the individual's location or the location hierarchy.
+If a batch was generated with conflicting parent/child scopes, regenerate it
+with consistent filters; upload will not silently drop a saved scope.
+
+```graphql
+mutation ValidateIndividuals($file: String!) {
+  uploadIndividualValidationList(fileBase64: $file, dryRun: true, sourceFileName: "checked.xlsx") {
+    batchId dryRun status rowsRead rowsApplied rowsSkipped errors errorMessages
+    wouldUpdate individualsUpdated uploadAttemptId
+  }
+}
+```
+
+Dry run performs parsing and current eligibility checks without changing an
+individual, batch, row or history record. `wouldUpdate` predicts changed individuals;
+`individualsUpdated` is zero in a dry run and counts actual writes after commit.
+Submit again with `dryRun: false` to commit; current state is checked again.
+
+Each committed upload uses one transaction and a new `uploadAttemptId`. These
+commits lock their batch row before reading its attempt summaries and current
+individual state, so simultaneous uploads for the same batch serialize rather
+than overwrite each other's attempt metadata. Committed uploads also lock currently
+accessible selected individual rows in primary-key order before reading their JSON.
+Overlapping batches therefore merge into the latest locked values instead of
+overwriting each other's unrelated updates. Eligibility is checked after acquiring
+these locks. Other writers must also read under a row lock or use an atomic update
+to protect their own merges; this does not repair stale writes by unrelated code.
+Dry runs do not acquire write locks or persist changes; committing still rechecks
+current state.
+
+Valid submitted decisions are recorded as APPLIED even if the individual already has
+the same values; blank decisions are SKIPPED. Expected row errors are recorded
+as ERROR while other valid rows apply, producing PARTIAL_SUCCESS. All-error files
+are FAILED; a file with no errors is PROCESSED. Unknown batches are rejected and
+never created by upload. Unexpected write failures roll back the entire attempt.
+
+Those outcomes describe individual attempts. Once a batch is PROCESSED or
+PARTIAL_SUCCESS, a retry applying zero decisions retains that batch status, including
+all-error and blank-only retries. An attempt applying decisions sets the batch to
+that attempt's outcome; the batch status is not a cumulative count of verified people.
+Every committed attempt still saves its own outcome, and batch JSON records
+`last_upload_attempt_id` and `last_upload_status`. The batch picker shows the retained
+batch status; immediate results and attempt history show the retry's actual outcome.
+Batch upload time, filename and compact error summary describe the latest attempt.
+
+Decisions update `Individual.json_ext.validation_status` directly, together with
+valid configured fields and notes. On a decided row, blank or whitespace-only notes
+clear an existing `validation_notes` value to JSON null; supplied notes replace it.
+Blank-decision rows leave notes and all other values unchanged. Unrelated JSON, household status,
+membership and primary workers are preserved. An identical retry creates an audit
+attempt and result rows without an unnecessary individual save/history entry.
+Corrections create new attempts without replacing earlier decisions. Existing
+Individual history and validation batch rows supply the audit trail.
+
+```graphql
+query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
+  individualValidationBatches(first: 20, offset: 0) {
+    count hasNextPage
+    items { batchId benefitPlanCode generatedAt uploadedAt sourceFileName status selectedIndividuals }
+  }
+  individualValidationAttempts(batchId: $batch) { count attempts }
+  individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt, first: 20, offset: 0) {
+    count items hasNextPage
+  }
+  individualValidationErrorReport(batchId: $batch, uploadAttemptId: $attempt) {
+    fileName fileBase64 errorCount
+  }
+}
+```
+
+`individualValidationBatches` requires `958003` and lists recent issued individual
+batch summaries in generation order. It returns programme, dates, filename,
+status and issued-person count, with no selected identities or raw snapshots.
+Creators/admins can see their batch metadata; other readers need current access
+to at least one active selected person. Scope filtering occurs before counts and
+SQL pagination (`first` defaults to 20, maximum 100). This supports choosing an
+issued list in the frontend without entering its UUID.
+
+Attempt history/rows require `958003`; the attempt-specific CSV error report requires
+`958004`. No new rights are introduced. Batch creators, administrators or users
+with current access to selected individuals may access attempt metadata, subject
+to those rights. Personal row data is returned only for individuals currently
+visible to the reader; other rows have `redacted: true`, no individual ID and empty
+raw/JSON values. CSV reports use the saved programme columns and the same redaction.
+Rows without a linked individual (for example, invalid or foreign workbook identities)
+retain their correction error message, while their submitted raw/JSON values and
+identity remain hidden. Linked individuals who are deleted or outside current access
+still have their row-specific error message redacted along with their personal data.
+Deleted or inaccessible people produce individual row errors rather than blocking
+processing of the rest of an authorized upload.
+
+Attempt summaries retain counters, outcome, actor, filename and timing metadata;
+new summaries do not duplicate the full `error_messages` list. The immediate
+upload/dry-run response still includes those messages. Detailed committed errors
+remain on their attempt rows and in the CSV report, with a compact current-attempt
+error summary on the batch.
+
+Attempt rows use SQL pagination: `first` defaults to 20 and accepts integers from
+0 to 100; `offset` defaults to 0 and must be a non-negative integer. Invalid
+ranges are rejected. `count` is the total number of rows in that
+attempt, including redacted rows; `items` is the requested page and `hasNextPage`
+indicates whether more rows remain. Clients that previously assumed all rows were
+returned must paginate. The attempt-specific CSV always includes every error row,
+independent of the result page size, and applies the same current-access redaction.
+
 ---
 
 ## Program-Specific Export Columns
