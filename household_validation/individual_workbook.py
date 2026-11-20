@@ -248,6 +248,7 @@ def parse_individual_validation_workbook(workbook, batch):
     registry = {col["key"]: col for col in columns}
     selected = {row["individual_uuid"]: row for row in iter_selection(batch)}
     identities = {}
+    batch_error = "Workbook contains mixed or mismatched batch IDs."
     for number in range(2, sheet.max_row + 1):
         cells = {name: sheet.cell(number, index) for name, index in headers.items()}
         values = {name: cell.value for name, cell in cells.items()}
@@ -260,7 +261,8 @@ def parse_individual_validation_workbook(workbook, batch):
         except ValueError:
             row.errors.append(f"Row {number}: invalid individual UUID")
         if _structural_value(values["batch_id"]) != str(batch.pk):
-            result.errors.append("Workbook contains mixed or mismatched batch IDs.")
+            if batch_error not in result.errors:
+                result.errors.append(batch_error)
             row.errors.append(f"Row {number}: batch ID does not match")
         original = selected.get(row.individual_id)
         if original is None:
