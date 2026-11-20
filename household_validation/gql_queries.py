@@ -40,6 +40,22 @@ class IndividualValidationSavedListGQLType(graphene.ObjectType):
     has_next_page = graphene.Boolean()
 
 
+class IndividualValidationBatchSummaryGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    benefit_plan_code = graphene.String()
+    generated_at = graphene.DateTime()
+    uploaded_at = graphene.DateTime()
+    source_file_name = graphene.String()
+    status = graphene.String()
+    selected_individuals = graphene.Int()
+
+
+class IndividualValidationBatchesGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    has_next_page = graphene.Boolean()
+    items = graphene.List(IndividualValidationBatchSummaryGQLType)
+
+
 class IndividualValidationAttemptsGQLType(graphene.ObjectType):
     count = graphene.Int()
     attempts = graphene.List(GenericScalar)

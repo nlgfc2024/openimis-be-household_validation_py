@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db import transaction
+from django.db.models import Exists, OuterRef, Q
 from django.utils import timezone
 
 from individual.data_source import DEFAULT_DATA_SOURCE, data_source_q, record_data_source
@@ -16,7 +17,9 @@ from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
 from household_validation.individual_lists import _json_snapshot
 from household_validation.individual_selection import EligibleIndividualSelectionService
-from household_validation.individual_snapshots import is_individual_list, selected_individual_ids
+from household_validation.individual_snapshots import (
+    SELECTION_ROW_KIND, SELECTION_STORAGE, is_individual_list, selected_individual_ids,
+)
 from household_validation.individual_workbook import (
     IndividualValidationListExporter, ParsedIndividualValidationRow, load_individual_workbook,
     parse_individual_validation_workbook, workbook_batch_id,
@@ -38,6 +41,40 @@ def _audit_value(value):
 class IndividualValidationUploadService:
     def __init__(self, user):
         self.user = user
+
+    def batches(self, first=20, offset=0):
+        """Recent issued batches, with the same metadata access as attempt history."""
+        require_permissions(self.user, HouseholdValidationConfig.gql_query_household_validation_history_perms,
+                            error_class=PermissionDenied)
+        if type(first) is not int or not 0 <= first <= 100 or type(offset) is not int or offset < 0:
+            raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
+        batches = HouseholdValidationBatch.objects.filter(
+            is_deleted=False, generated_at__isnull=False,
+            json_ext__subject="INDIVIDUAL", json_ext__selection_storage=SELECTION_STORAGE,
+        )
+        if not getattr(self.user, "is_imis_admin", False):
+            visible = Individual.get_queryset(Individual.objects.filter(is_deleted=False), self.user)
+            visible_rows = HouseholdValidationBatchRow.objects.filter(
+                batch_id=OuterRef("pk"), is_deleted=False, upload_attempt_id__isnull=True,
+                json_ext__kind=SELECTION_ROW_KIND, individual_id__in=visible.values("pk"),
+            )
+            batches = batches.annotate(_visible_selection=Exists(visible_rows)).filter(
+                Q(user_created_id=self.user.id) | Q(_visible_selection=True),
+            )
+        count = batches.count()
+        page = batches.order_by("-generated_at", "-date_created", "-pk").values(
+            "pk", "generated_at", "uploaded_at", "source_file_name", "status",
+            "json_ext__benefit_plan_code", "json_ext__selected_individuals",
+        )[offset:offset + first]
+        return {
+            "count": count, "has_next_page": offset + first < count,
+            "items": [{
+                "batch_id": row["pk"], "benefit_plan_code": row["json_ext__benefit_plan_code"],
+                "generated_at": row["generated_at"], "uploaded_at": row["uploaded_at"],
+                "source_file_name": row["source_file_name"], "status": row["status"],
+                "selected_individuals": row["json_ext__selected_individuals"],
+            } for row in page],
+        }
 
     def _context(self, batch_id, permissions, for_update=False):
         require_permissions(self.user, permissions, error_class=PermissionDenied)

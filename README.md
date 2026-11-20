@@ -615,6 +615,10 @@ Individual history and validation batch rows supply the audit trail.
 
 ```graphql
 query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
+  individualValidationBatches(first: 20, offset: 0) {
+    count hasNextPage
+    items { batchId benefitPlanCode generatedAt uploadedAt sourceFileName status selectedIndividuals }
+  }
   individualValidationAttempts(batchId: $batch) { count attempts }
   individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt, first: 20, offset: 0) {
     count items hasNextPage
@@ -624,6 +628,14 @@ query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
   }
 }
 ```
+
+`individualValidationBatches` requires `958003` and lists recent issued individual
+batch summaries in generation order. It returns programme, dates, filename,
+status and issued-person count, with no selected identities or raw snapshots.
+Creators/admins can see their batch metadata; other readers need current access
+to at least one active selected person. Scope filtering occurs before counts and
+SQL pagination (`first` defaults to 20, maximum 100). This supports choosing an
+issued list in the frontend without entering its UUID.
 
 Attempt history/rows require `958003`; the attempt-specific CSV error report requires
 `958004`. No new rights are introduced. Batch creators, administrators or users
