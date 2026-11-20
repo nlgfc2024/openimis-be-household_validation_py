@@ -14,7 +14,7 @@ from django.test.utils import CaptureQueriesContext
 from openpyxl import load_workbook
 
 from core.models import User
-from individual.models import Individual
+from individual.models import GroupIndividual, Individual
 
 from household_validation import test_individual_selection as fixtures
 from household_validation.apps import HouseholdValidationConfig
@@ -624,6 +624,27 @@ class IndividualWorkbookTests(TestCase):
         _, exported = self.service.export(batch.pk)
         self.assertEqual(list(self.workbook(content)[INDIVIDUAL_SHEET].values),
                          list(self.workbook(exported)[INDIVIDUAL_SHEET].values))
+
+    def test_joined_access_filters_do_not_duplicate_or_expose_other_saved_people(self):
+        batch, _ = self.generate()
+        GroupIndividual.objects.bulk_create([
+            GroupIndividual(id=uuid4(), group=self.group, individual=self.standalone,
+                            user_created=self.actor, user_updated=self.actor)
+            for _ in range(2)
+        ])
+        with patch.object(Individual, "get_queryset", side_effect=lambda qs, user: qs.filter(
+            groupindividuals__group=self.group, groupindividuals__is_deleted=False,
+        )):
+            page = self.service.preview(batch.pk, first=1)
+            self.assertEqual(page["available_individuals"], 1)
+            self.assertEqual(page["inaccessible_individuals"], 3)
+            self.assertEqual([row["individual_uuid"] for row in page["items"]], [str(self.standalone.pk)])
+            self.assertFalse(page["has_next_page"])
+            self.assertEqual(self.service.preview(batch.pk, first=1, offset=1)["items"], [])
+            _, content = self.service.export(batch.pk)
+            rows = list(self.workbook(content)[INDIVIDUAL_SHEET].values)
+            self.assertEqual(len(rows), 2)
+            self.assertEqual(rows[1][1], str(self.standalone.pk))
 
     def test_thousands_of_saved_rows_are_paged_in_sql_and_not_embedded_in_batch_json(self):
         Individual.objects.bulk_create([
