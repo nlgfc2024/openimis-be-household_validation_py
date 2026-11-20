@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from io import StringIO
+from uuid import UUID
 
 from openpyxl import load_workbook
 
@@ -99,11 +100,12 @@ def _merge_columns(first, second):
     """Merge two program's column definitions that share a `key`.
 
     Different programs can define the same column `key` (and `column_name`
-    header) with different `options`/bounds/`required. Upload has no reliable way to
-    know which program a given workbook came from, so it validates
-    permissively against the union of every program that defines this key,
+    header) with different `options`/bounds/`required. Unissued legacy household
+    files have no reliable programme metadata, so that fallback validates
+    permissively against the union of household programmes defining this key,
     rather than picking one arbitrarily (which would silently reject valid
-    values from whichever program lost the merge).
+    values from whichever program lost the merge). Issued batches select their
+    programme's registry directly instead.
     """
     merged = dict(first)
     if first.get("type") == "select" and second.get("type") == "select":
@@ -132,15 +134,44 @@ def _merge_columns(first, second):
     return merged
 
 
-def _column_registry():
+def _column_registry(benefit_plan_code=None):
+    # The individual parser reads its saved columns separately. Its definitions
+    # must never add required answers or loosen a household programme's rules.
+    from household_validation.programmes import INDIVIDUAL, programme_rules, resolve_programme_columns
+
+    if benefit_plan_code is not None:
+        return {col["key"]: col for col in resolve_programme_columns(benefit_plan_code)}
     programs = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
+    rules = programme_rules(HouseholdValidationConfig.program_eligibility_rules or {})
     registry = {}
-    for columns in programs.values():
+    for code, columns in programs.items():
+        if rules.get(str(code).strip().upper(), {}).get("subject") == INDIVIDUAL:
+            continue
         for col in columns:
             existing = registry.get(col["key"])
             registry[col["key"]] = _merge_columns(existing, col) if existing else col
     overridden = apply_column_option_overrides(list(registry.values()))
     return {col["key"]: col for col in overridden}
+
+
+def _issued_household_programme(worksheet, batch_column):
+    """Resolve an issued household programme; unissued legacy files keep their union rules."""
+    from household_validation.models import HouseholdValidationBatch
+    from household_validation.programmes import INDIVIDUAL
+
+    ids = {_clean(worksheet.cell(row=number, column=batch_column).value)
+           for number in range(2, worksheet.max_row + 1)} - {None}
+    if len(ids) != 1:
+        return None
+    try:
+        batch_id = UUID(ids.pop())
+    except (TypeError, ValueError):
+        return None
+    batch = HouseholdValidationBatch.objects.filter(pk=batch_id).first()
+    if not batch or not batch.generated_at or (batch.json_ext or {}).get("subject") == INDIVIDUAL:
+        return None
+    metadata = batch.json_ext or {}
+    return (metadata.get("benefit_plan_code") or "") if "benefit_plan_code" in metadata else None
 
 
 def parse_validation_workbook(file_or_bytes):
@@ -161,6 +192,15 @@ def parse_validation_workbook(file_or_bytes):
         return WorkbookParseResult(
             errors=[f"Missing required columns: {', '.join(missing_columns)}"]
         )
+
+    programme = _issued_household_programme(worksheet, headers["batch_id"])
+    if programme is not None:
+        column_registry = _column_registry(programme)
+        extra_columns = {col["key"]: col["column_name"] for col in column_registry.values()}
+        try:
+            headers = _read_headers(worksheet, extra_columns)
+        except ValueError as exc:
+            return WorkbookParseResult(errors=[str(exc)])
 
     project_options = _read_project_options(workbook)
     rows = []
