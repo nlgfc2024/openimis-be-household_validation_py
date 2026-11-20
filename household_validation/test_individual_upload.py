@@ -121,6 +121,62 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(rejected["errors"], 1)
         self.assertEqual(Individual.objects.get(pk=selected).json_ext["validation_status"], "NOT_VERIFIED")
 
+    def test_not_verified_preserves_registry_changes_made_after_a_previously_populated_list_is_issued(self):
+        Individual.objects.update(json_ext={"turnover": 20, "owns": "No", "kind": None})
+        batch, content = self.generate(target_count=1)
+        selected = next(iter_selection(batch))["individual_uuid"]
+        current = {
+            "turnover": 80, "owns": "Yes", "kind": "Farming", "description": {"latest": True},
+            "validation_status": "VERIFIED", "validation_notes": "Latest visit", "unrelated": "keep",
+        }
+        Individual.objects.filter(pk=selected).update(json_ext=current)
+        workbook = self.workbook(content)
+        fixtures.IndividualWorkbookTests.edit(workbook, decision="NOT_VERIFIED")
+        content = self.serialise(workbook)
+        dry_run = self.uploader.upload(content, dry_run=True)
+        self.assertEqual(dry_run["errors"], 0)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, current)
+        result = self.uploader.upload(content)
+        self.assertEqual(result["rows_applied"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {**current, "validation_status": "NOT_VERIFIED"})
+
+    def test_verified_requires_new_answers_and_preserves_unanswered_optional_live_fields(self):
+        Individual.objects.update(json_ext={"turnover": 20, "owns": "No", "description": "Old description"})
+        batch, content = self.generate(target_count=1)
+        selected = next(iter_selection(batch))["individual_uuid"]
+        current = {"turnover": 80, "owns": "Yes", "kind": "Farming", "description": {"latest": True}}
+        Individual.objects.filter(pk=selected).update(json_ext=current)
+        workbook = self.workbook(content)
+        fixtures.IndividualWorkbookTests.edit(workbook, decision="VERIFIED")
+        invalid = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(invalid["errors"], 1)
+        self.assertEqual(invalid["individuals_updated"], 0)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, current)
+        fixtures.IndividualWorkbookTests.edit(workbook, Turnover=25, **{
+            "Owns business": "Yes", "Business kind": "Retail",
+        })
+        accepted = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(accepted["errors"], 0)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {
+            **current, "turnover": 25.0, "owns": "Yes", "kind": "Retail", "validation_status": "VERIFIED",
+        })
+
+    def test_verified_with_optional_business_fields_does_not_echo_any_old_values(self):
+        from household_validation.apps import HouseholdValidationConfig
+
+        Individual.objects.update(json_ext={"turnover": 20, "owns": "No", "kind": None})
+        columns = [{**column, "required": False} for column in fixtures.COLUMNS]
+        with patch.object(HouseholdValidationConfig, "program_specific_export_columns", {"UMEP": columns}):
+            batch, content = self.generate(target_count=1)
+        selected = next(iter_selection(batch))["individual_uuid"]
+        current = {"turnover": 80, "owns": "Yes", "kind": "Farming", "description": {"latest": True}}
+        Individual.objects.filter(pk=selected).update(json_ext=current)
+        workbook = self.workbook(content)
+        fixtures.IndividualWorkbookTests.edit(workbook, decision="VERIFIED")
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["errors"], 0)
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {**current, "validation_status": "VERIFIED"})
+
     def test_partial_success_logs_invalid_row_and_applies_the_rest(self):
         batch, workbook, headers = self.make_upload()
         workbook[INDIVIDUAL_SHEET].cell(3, headers["Turnover"], -1)

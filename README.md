@@ -455,6 +455,20 @@ Preview and re-export read the saved values; later registry or configuration
 edits do not change those values. Decision cells start blank, including on
 revalidation lists.
 
+Editable business cells also start blank, regardless of existing registry
+answers. Only deliberately supplied answers are parsed into updates; issuing a
+list does not pre-fill old values that could later overwrite newer registry
+changes or clear dependants. VERIFIED requires fresh applicable answers, while
+NOT_VERIFIED can leave business cells blank to preserve current values. An
+explicit dependency answer may still clear an inapplicable dependent field.
+Protected descriptive columns continue to carry their configured saved values.
+
+Candidate identities are materialized once for selection and issued counts.
+Snapshots are built from those selected IDs rather than re-evaluating eligibility.
+If a selected identity disappears before its snapshot can be saved, generation
+rolls back and asks the caller to generate again instead of substituting people
+or silently shortening the issued list.
+
 ```graphql
 mutation {
   generateIndividualValidationList(
@@ -557,6 +571,11 @@ inaccessible individual receives a row error with no parsed updates, while other
 valid rows remain usable. A removed individual's saved protected fields are
 never returned through preview or re-export. Parsing itself creates no upload
 attempts or individual updates.
+
+Household uploads reject an existing batch tagged INDIVIDUAL, including deleted
+or unsupported individual-list formats. This applies to dry run and commit,
+before household attempt rows or batch status can be written. Legacy household
+batches retain their existing upload behaviour.
 
 ### Applying individual decisions
 

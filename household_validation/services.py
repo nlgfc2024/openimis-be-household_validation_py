@@ -14,7 +14,7 @@ from individual.services import GroupIndividualService, IndividualService
 from project_social_protection.models import Project
 
 from household_validation.geography import ValidationGeographyMixin
-from household_validation.programmes import HOUSEHOLD, resolve_programme_rule, resolve_programme_columns
+from household_validation.programmes import HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns
 from household_validation.excel import (
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
@@ -151,6 +151,7 @@ class HouseholdValidationUploadService:
             and self._uploaded_group_key(row) not in primary_worker_rejections
         })
         if dry_run:
+            self._existing_household_batch(self._batch_id(parsed))
             totals["households_verified"] = sum(status == VERIFIED for status in decisions.values())
             totals["households_not_verified"] = sum(status == NOT_VERIFIED for status in decisions.values())
             for status, key in ((VERIFIED, "participants_verified"), (NOT_VERIFIED, "participants_not_verified")):
@@ -442,12 +443,23 @@ class HouseholdValidationUploadService:
     def _uploaded_group_key(uploaded_row):
         return str(uploaded_row.values.get("group_uuid") or "").strip()
 
-    def _get_or_create_batch(self, parsed, source_file_name=None):
-        batch_id = self._batch_id(parsed)
+    @staticmethod
+    def _existing_household_batch(batch_id):
         if batch_id:
             batch = HouseholdValidationBatch.objects.filter(id=batch_id).first()
             if batch:
+                # Reject every individual subject, including unsupported/deleted
+                # saved-list formats, before household status or rows can change.
+                if (batch.json_ext or {}).get("subject") == INDIVIDUAL:
+                    raise ValidationError("Household uploads cannot use an individual validation batch.")
                 return batch
+        return None
+
+    def _get_or_create_batch(self, parsed, source_file_name=None):
+        batch_id = self._batch_id(parsed)
+        existing = self._existing_household_batch(batch_id)
+        if existing is not None:
+            return existing
         batch = HouseholdValidationBatch(
             source_file_name=source_file_name,
             status=HouseholdValidationBatch.Status.PENDING,

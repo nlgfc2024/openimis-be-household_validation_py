@@ -86,9 +86,7 @@ class IndividualValidationListService:
                     pending = []
             HouseholdValidationBatchRow.bulk_save(pending, self.user, batch_size=500)
             if count != selection.selected_individuals:
-                # A concurrent deletion must not issue inconsistent identities/counts.
-                batch.json_ext["selected_individuals"] = count
-                batch.save(user=self.user)
+                raise ValidationError("Selected individuals disappeared during generation; generate the list again.")
             return batch, IndividualValidationListExporter(batch).export_bytes()
 
     @staticmethod
@@ -109,10 +107,9 @@ class IndividualValidationListService:
                 value = json.dumps(value) if isinstance(value, (dict, list)) else str(value)
             row[col["column_name"]] = value
         for col in columns:
-            value = extra.get(col["target_individual_json_ext_key"])
-            if isinstance(value, (dict, list)):
-                value = json.dumps(value)
-            row[col["column_name"]] = value
+            # Editable answers must be deliberate submissions, not stale registry
+            # values silently echoed back after the workbook has been in the field.
+            row[col["column_name"]] = None
         return row
 
     def scoped_individuals(self, batch):
