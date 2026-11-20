@@ -138,7 +138,9 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(Individual.objects.get(pk=selected).json_ext, current)
         result = self.uploader.upload(content)
         self.assertEqual(result["rows_applied"], 1)
-        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {**current, "validation_status": "NOT_VERIFIED"})
+        self.assertEqual(Individual.objects.get(pk=selected).json_ext, {
+            **current, "validation_status": "NOT_VERIFIED", "validation_notes": None,
+        })
 
     def test_verified_requires_new_answers_and_preserves_unanswered_optional_live_fields(self):
         Individual.objects.update(json_ext={"turnover": 20, "owns": "No", "description": "Old description"})

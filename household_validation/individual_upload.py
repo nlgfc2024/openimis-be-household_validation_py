@@ -90,7 +90,12 @@ class IndividualValidationUploadService:
         selected = {str(pk) for pk in selected_individual_ids(batch)}
         existing = {str(pk) for pk in Individual.objects.filter(pk__in=selected).values_list("pk", flat=True)}
         scoped = Individual.get_queryset(Individual.objects.filter(pk__in=selected, is_deleted=False), self.user)
-        visible = {str(person.pk): person for person in scoped.distinct()}
+        # Lock base individual rows, not the joins/distinct used for row security.
+        # A stable order also prevents overlapping batches locking people in reverse order.
+        people = Individual.objects.filter(pk__in=scoped.values("pk")).order_by("pk")
+        if for_update:
+            people = people.select_for_update(of=("self",))
+        visible = {str(person.pk): person for person in people}
         owner = batch.user_created_id == self.user.id
         if not visible and not owner and not getattr(self.user, "is_imis_admin", False):
             raise PermissionDenied("You cannot access this individual validation batch.")
@@ -167,16 +172,17 @@ class IndividualValidationUploadService:
                             errors.append("Individual is outside your current access.")
                         elif row.individual_id not in eligible_ids:
                             errors.append("Individual no longer meets the saved source, household or geographic scope.")
+                    current = person.json_ext if person is not None and isinstance(person.json_ext, dict) else {}
                     updates = {}
                     if not errors and row.decision is not None:
                         updates = {**row.updates, "validation_status": row.decision}
-                        if row.notes is not None:
-                            updates["validation_notes"] = row.notes
-                        prospective = dict(person.json_ext) if isinstance(person.json_ext, dict) else {}
+                        notes = row.notes if row.notes and row.notes.strip() else None
+                        if notes is not None or "validation_notes" in current:
+                            updates["validation_notes"] = notes
+                        prospective = dict(current)
                         prospective.update(updates)
                         if record_data_source(SimpleNamespace(json_ext=prospective)) != source:
                             errors.append("Configured fields cannot move the individual to another source.")
-                    current = person.json_ext if person is not None and isinstance(person.json_ext, dict) else {}
                     changed = bool(updates) and person is not None and any(
                         key not in current or current[key] != value for key, value in updates.items()
                     )
@@ -231,8 +237,14 @@ class IndividualValidationUploadService:
                     "source_file_name": source_file_name,
                 })
                 data["upload_attempts"] = attempts
+                data["last_upload_attempt_id"] = str(attempt)
+                data["last_upload_status"] = totals["status"]
                 batch.json_ext = data
-                batch.status = totals["status"]
+                successful = (
+                    HouseholdValidationBatch.Status.PROCESSED, HouseholdValidationBatch.Status.PARTIAL_SUCCESS,
+                )
+                if totals["rows_applied"] or batch.status not in successful:
+                    batch.status = totals["status"]
                 batch.uploaded_at = uploaded_at
                 batch.source_file_name = source_file_name
                 batch.error_summary = (
@@ -270,7 +282,7 @@ class IndividualValidationUploadService:
                 "id": row.pk, "row_number": row.row_number, "status": row.status,
                 "individual_id": row.individual_id if allowed else None,
                 "raw_row": row.raw_row if allowed else {}, "json_ext": row.json_ext if allowed else {},
-                "error_message": row.error_message if allowed or not row.raw_row
+                "error_message": row.error_message if allowed or row.individual_id is None or not row.raw_row
                 else "Row data is not currently accessible.", "redacted": not allowed,
             })
 

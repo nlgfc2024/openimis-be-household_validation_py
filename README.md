@@ -616,8 +616,14 @@ Submit again with `dryRun: false` to commit; current state is checked again.
 Each committed upload uses one transaction and a new `uploadAttemptId`. These
 commits lock their batch row before reading its attempt summaries and current
 individual state, so simultaneous uploads for the same batch serialize rather
-than overwrite each other's attempt metadata. Dry runs do not acquire this
-write lock or persist changes; committing still rechecks current state.
+than overwrite each other's attempt metadata. Committed uploads also lock currently
+accessible selected individual rows in primary-key order before reading their JSON.
+Overlapping batches therefore merge into the latest locked values instead of
+overwriting each other's unrelated updates. Eligibility is checked after acquiring
+these locks. Other writers must also read under a row lock or use an atomic update
+to protect their own merges; this does not repair stale writes by unrelated code.
+Dry runs do not acquire write locks or persist changes; committing still rechecks
+current state.
 
 Valid submitted decisions are recorded as APPLIED even if the individual already has
 the same values; blank decisions are SKIPPED. Expected row errors are recorded
@@ -625,8 +631,19 @@ as ERROR while other valid rows apply, producing PARTIAL_SUCCESS. All-error file
 are FAILED; a file with no errors is PROCESSED. Unknown batches are rejected and
 never created by upload. Unexpected write failures roll back the entire attempt.
 
+Those outcomes describe individual attempts. Once a batch is PROCESSED or
+PARTIAL_SUCCESS, a retry applying zero decisions retains that batch status, including
+all-error and blank-only retries. An attempt applying decisions sets the batch to
+that attempt's outcome; the batch status is not a cumulative count of verified people.
+Every committed attempt still saves its own outcome, and batch JSON records
+`last_upload_attempt_id` and `last_upload_status`. The batch picker shows the retained
+batch status; immediate results and attempt history show the retry's actual outcome.
+Batch upload time, filename and compact error summary describe the latest attempt.
+
 Decisions update `Individual.json_ext.validation_status` directly, together with
-valid configured fields and supplied notes. Unrelated JSON, household status,
+valid configured fields and notes. On a decided row, blank or whitespace-only notes
+clear an existing `validation_notes` value to JSON null; supplied notes replace it.
+Blank-decision rows leave notes and all other values unchanged. Unrelated JSON, household status,
 membership and primary workers are preserved. An identical retry creates an audit
 attempt and result rows without an unnecessary individual save/history entry.
 Corrections create new attempts without replacing earlier decisions. Existing
@@ -662,6 +679,10 @@ with current access to selected individuals may access attempt metadata, subject
 to those rights. Personal row data is returned only for individuals currently
 visible to the reader; other rows have `redacted: true`, no individual ID and empty
 raw/JSON values. CSV reports use the saved programme columns and the same redaction.
+Rows without a linked individual (for example, invalid or foreign workbook identities)
+retain their correction error message, while their submitted raw/JSON values and
+identity remain hidden. Linked individuals who are deleted or outside current access
+still have their row-specific error message redacted along with their personal data.
 Deleted or inaccessible people produce individual row errors rather than blocking
 processing of the rest of an authorized upload.
 
