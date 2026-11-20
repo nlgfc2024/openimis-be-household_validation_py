@@ -134,15 +134,17 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(row["status"] in ("APPLIED", "SKIPPED") for row in rows))
 
-    def test_upload_can_still_apply_a_legacy_json_selection(self):
+    def test_json_only_selection_cannot_be_uploaded(self):
         batch, workbook, _ = self.make_upload()
         batch.json_ext["selection"] = list(iter_selection(batch))
         batch.json_ext.pop("selection_storage")
         batch.save(user=self.actor)
         selection_rows(batch).delete()
-        result = self.uploader.upload(self.serialise(workbook))
-        self.assertEqual(result["status"], "PROCESSED")
-        self.assertEqual(result["individuals_updated"], 2)
+        before = list(Individual.objects.values_list("pk", "json_ext"))
+        with self.assertRaisesMessage(ValidationError, "Batch is not a generated individual list."):
+            self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(before, list(Individual.objects.values_list("pk", "json_ext")))
+        self.assertFalse(batch.rows.filter(upload_attempt_id__isnull=False).exists())
 
     def test_unknown_batches_do_not_create_new_batches_or_attempts(self):
         batch, workbook, _ = self.make_upload()
