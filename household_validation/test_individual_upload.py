@@ -17,6 +17,7 @@ from django.test.utils import CaptureQueriesContext
 
 from core.models import User
 from individual.models import Group, GroupIndividual, Individual
+from location.models import Location
 
 from household_validation import test_individual_workbook as fixtures
 from household_validation.individual_upload import IndividualValidationUploadService
@@ -39,8 +40,11 @@ class IndividualValidationUploadTests(TestCase):
     workbook = staticmethod(fixtures.IndividualWorkbookTests.workbook)
     serialise = staticmethod(fixtures.IndividualWorkbookTests.serialise)
 
-    def make_upload(self, decisions=("VERIFIED", "NOT_VERIFIED", None)):
-        batch, content = self.generate(target_count=len(decisions))
+    def make_upload(self, decisions=("VERIFIED", "NOT_VERIFIED", None), scope=None):
+        if scope is None:
+            batch, content = self.generate(target_count=len(decisions))
+        else:
+            batch, content = self.service.generate("UMEP", target_count=len(decisions), **scope)
         workbook = self.workbook(content)
         sheet = workbook[INDIVIDUAL_SHEET]
         headers = {cell.value: cell.column for cell in sheet[1]}
@@ -367,6 +371,123 @@ class IndividualValidationUploadTests(TestCase):
         result = self.uploader.upload(self.serialise(workbook))
         self.assertEqual(result["status"], "FAILED")
         self.assertEqual(result["individuals_updated"], 0)
+
+    def test_constituency_is_checked_even_when_neighbourhood_matches_and_column_is_omitted(self):
+        other_constituency = Location.objects.create(
+            code="UV-D-OTHER", name="Other constituency", type="D", parent=self.district, audit_user_id=1,
+        )
+        for constituency in ({"ta_id": self.ta.pk}, {"ta_code": self.ta.code}, {"ta_codes": [self.ta.code]}):
+            with self.subTest(constituency=constituency):
+                Location.objects.filter(pk=self.gvh.pk).update(parent=self.ta)
+                batch, workbook, headers = self.make_upload(("VERIFIED",), scope={
+                    "district_code": self.district.code, **constituency,
+                    "gvh_codes": [self.gvh.code], "village_code": self.village.code,
+                })
+                self.assertNotIn("Constituency", headers)
+                self.assertNotIn("TA", headers)
+                selected = next(iter_selection(batch))["individual_uuid"]
+                before = Individual.objects.get(pk=selected).json_ext
+                # The same neighbourhood/ward now belongs to another constituency.
+                Location.objects.filter(pk=self.gvh.pk).update(parent=other_constituency)
+                content = self.serialise(workbook)
+                dry_run = self.uploader.upload(content, dry_run=True)
+                self.assertEqual(dry_run["errors"], 1)
+                self.assertEqual(dry_run["would_update"], 0)
+                self.assertFalse(batch.rows.filter(upload_attempt_id__isnull=False).exists())
+                result = self.uploader.upload(content)
+                self.assertEqual(result["status"], "FAILED")
+                self.assertEqual(result["individuals_updated"], 0)
+                self.assertTrue(any("geographic scope" in error for error in result["error_messages"]))
+                self.assertEqual(Individual.objects.get(pk=selected).json_ext, before)
+                report, count = self.uploader.error_report(batch.pk, result["upload_attempt_id"])
+                self.assertEqual(count, 1)
+                self.assertNotIn("Constituency", next(csv.reader(StringIO(report))))
+                self.assertEqual(selection_rows(batch).count(), 1)
+
+    def test_city_is_checked_after_constituency_reparenting_even_when_neighbourhood_matches(self):
+        batch, workbook, _ = self.make_upload(("VERIFIED",), scope={
+            "district_id": self.district.pk, "ta_id": self.ta.pk, "village_code": self.village.code,
+        })
+        selected = next(iter_selection(batch))["individual_uuid"]
+        Location.objects.filter(pk=self.ta.pk).update(parent=self.other)
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(result["individuals_updated"], 0)
+        self.assertNotIn("validation_status", Individual.objects.get(pk=selected).json_ext)
+
+    def test_ward_is_checked_after_neighbourhood_reparenting(self):
+        other_ward = Location.objects.create(
+            code="UV-W-OTHER", name="Other ward", type="W", parent=self.ta, audit_user_id=1,
+        )
+        batch, workbook, _ = self.make_upload(("VERIFIED",), scope={
+            "ta_code": self.ta.code, "gvh_codes": [self.gvh.code], "village_id": self.village.pk,
+        })
+        Location.objects.filter(pk=self.village.pk).update(parent=other_ward)
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["status"], "FAILED")
+        self.assertEqual(result["individuals_updated"], 0)
+
+    def test_full_hierarchy_upload_succeeds_without_constituency_column_or_location_updates(self):
+        batch, workbook, headers = self.make_upload(("VERIFIED",), scope={
+            "district_code": self.district.code, "ta_code": self.ta.code,
+            "gvh_codes": [self.gvh.code], "village_code": self.village.code,
+        })
+        self.assertTrue({"City", "Ward", "Neighbourhood"}.issubset(headers))
+        self.assertNotIn("Constituency", headers)
+        selected = next(iter_selection(batch))["individual_uuid"]
+        parents = list(Location.objects.values_list("pk", "parent_id", "type"))
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["status"], "PROCESSED")
+        self.assertEqual(result["individuals_updated"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).location_id, self.village.pk)
+        self.assertEqual(list(Location.objects.values_list("pk", "parent_id", "type")), parents)
+
+    def test_city_scope_allows_an_individual_to_move_between_its_constituencies(self):
+        constituency = Location.objects.create(
+            code="UV-D-OTHER", name="Other constituency", type="D", parent=self.district, audit_user_id=1,
+        )
+        ward = Location.objects.create(code="UV-W-OTHER", type="W", parent=constituency, audit_user_id=1)
+        neighbourhood = Location.objects.create(code="UV-V-OTHER", type="V", parent=ward, audit_user_id=1)
+        batch, workbook, _ = self.make_upload(("VERIFIED",), scope={"district_code": self.district.code})
+        selected = next(iter_selection(batch))["individual_uuid"]
+        Individual.objects.filter(pk=selected).update(location=neighbourhood)
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["status"], "PROCESSED")
+        self.assertEqual(result["individuals_updated"], 1)
+        self.assertEqual(Individual.objects.get(pk=selected).location_id, neighbourhood.pk)
+
+    def test_multiple_allowed_constituencies_keep_their_saved_union(self):
+        constituency = Location.objects.create(
+            code="UV-D-OTHER", name="Other constituency", type="D", parent=self.district, audit_user_id=1,
+        )
+        batch, workbook, _ = self.make_upload(("VERIFIED",), scope={
+            "district_code": self.district.code, "ta_codes": [self.ta.code, constituency.code],
+            "village_code": self.village.code,
+        })
+        Location.objects.filter(pk=self.gvh.pk).update(parent=constituency)
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["status"], "PROCESSED")
+        self.assertEqual(result["individuals_updated"], 1)
+
+    def test_constituency_failure_does_not_block_other_rows_in_the_saved_list(self):
+        constituency = Location.objects.create(
+            code="UV-D-OTHER", name="Other constituency", type="D", parent=self.district, audit_user_id=1,
+        )
+        ward = Location.objects.create(code="UV-W-OTHER", type="W", parent=constituency, audit_user_id=1)
+        neighbourhood = Location.objects.create(code="UV-V-OTHER", type="V", parent=ward, audit_user_id=1)
+        batch, workbook, _ = self.make_upload(("VERIFIED", "VERIFIED"), scope={
+            "district_code": self.district.code, "ta_code": self.ta.code,
+        })
+        changed, unchanged = list(iter_selection(batch))
+        Individual.objects.filter(pk=changed["individual_uuid"]).update(location=neighbourhood)
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["status"], "PARTIAL_SUCCESS")
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(result["individuals_updated"], 1)
+        self.assertNotIn("validation_status", Individual.objects.get(pk=changed["individual_uuid"]).json_ext)
+        self.assertEqual(
+            Individual.objects.get(pk=unchanged["individual_uuid"]).json_ext["validation_status"], "VERIFIED",
+        )
 
     def test_changed_current_configuration_does_not_reinterpret_a_saved_file(self):
         batch, workbook, _ = self.make_upload(("VERIFIED",))

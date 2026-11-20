@@ -59,6 +59,29 @@ class IndividualValidationUploadService:
             raise PermissionDenied("You cannot access this individual validation batch.")
         return batch, selected, existing, visible, scoped
 
+    def _apply_saved_geography(self, queryset, geography):
+        """Intersect saved scopes; a matching child must not bypass a changed parent."""
+        scopes = (
+            ("region_id", "region_code"),
+            ("district_id", "district_code"),
+            ("ta_id", "ta_code", "ta_codes"),
+            ("gvh_codes",),
+            ("village_id", "village_code", "village_codes"),
+            ("hotspot_id", "hotspot_code"),
+            ("catchment_id", "catchment_code"),
+        )
+        supported = {key for scope in scopes for key in scope}
+        if set(geography) - supported:
+            raise ValidationError("Batch contains unsupported saved geographic filters.")
+        selector = EligibleIndividualSelectionService(self.user)
+        for scope in scopes:
+            values = {key: geography[key] for key in scope if geography.get(key)}
+            if values:
+                # Reuse the same ID/code alternatives within a level, while
+                # enforcing each saved level independently during upload.
+                queryset = selector._apply_location_filters(queryset, **values)
+        return queryset
+
     def upload(self, file_or_bytes, dry_run=False, source_file_name=None):
         require_permissions(self.user, HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
                             error_class=PermissionDenied)
@@ -83,7 +106,7 @@ class IndividualValidationUploadService:
                     individual__is_deleted=False,
                 ).values("individual_id")
                 eligible = scoped.filter(data_source_q(source)).exclude(pk__in=active)
-                eligible = EligibleIndividualSelectionService(self.user)._apply_location_filters(eligible, **geography)
+                eligible = self._apply_saved_geography(eligible, geography)
                 eligible_ids = {str(pk) for pk in eligible.values_list("pk", flat=True)}
                 deleted_ids = {str(pk) for pk in Individual.objects.filter(
                     pk__in=selected, is_deleted=True,

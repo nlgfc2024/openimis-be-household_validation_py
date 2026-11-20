@@ -566,6 +566,20 @@ person's current access, deletion state, source, active-household membership and
 saved geography. It does not reapply `excludeValidated` during upload, so retries
 and corrections remain possible after an accepted decision.
 
+Upload intersects every saved geographic scope. A matching neighbourhood does
+not bypass the saved Ward, Constituency or City scope if a location or its
+parents have moved since generation. For UMEP, Constituency is the existing
+`D`/TA level: saved `taId`, `taCode` or `taCodes` filters are checked through the
+current parent chain even though the workbook omits the Constituency column.
+ID/code alternatives within the same level retain their existing matching
+behaviour. Dry runs and committed uploads perform the same geographic checks;
+an out-of-scope individual receives a row error while other valid rows proceed.
+A City-only batch does not impose an additional Constituency restriction, so a
+move between constituencies within that City can remain valid. Uploading does
+not change the individual's location or the location hierarchy.
+If a batch was generated with conflicting parent/child scopes, regenerate it
+with consistent filters; upload will not silently drop a saved scope.
+
 ```graphql
 mutation ValidateIndividuals($file: String!) {
   uploadIndividualValidationList(fileBase64: $file, dryRun: true, sourceFileName: "checked.xlsx") {
