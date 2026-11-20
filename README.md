@@ -26,6 +26,8 @@ The module enables:
 - [Program-Based Selection](#program-based-selection)
 - [Configuration](#configuration)
 - [UMEP Individual Validation](#umep-individual-validation)
+- [UMEP configuration and rollout](docs/umep-individual-validation-rollout.md)
+- [UMEP integrated verification evidence](docs/umep-individual-validation-verification.md)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -421,6 +423,14 @@ does not exist or a person cannot be reached); omitted answers preserve stored
 values, subject to the configured dependency rules. Supplied answers for either
 decision must satisfy dependencies, types, options and numeric bounds. Household
 Primary Worker/status rules are unchanged.
+
+Household uploads exclude individual programme columns from their registry. A
+known generated household batch selects columns from its stored programme code;
+required fields remain enforced even if their header is removed. Older household
+files without issued programme metadata retain the existing permissive merge of
+household definitions. Individual workbooks continue to use their saved column
+snapshots. This prevents enabling UMEP from adding unrelated required fields to
+PWP, UPG or RMEP uploads, or loosening their select options.
 
 The read-only queries below reuse right `958001`. They expose programme metadata
 and current candidates; candidate results are not a saved workbook list.

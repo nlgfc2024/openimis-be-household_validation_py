@@ -142,9 +142,10 @@ DEFAULT_CONFIG = {
     #   Individual.json_ext.
     # - type: "select" (dropdown, needs options), "number" (needs optional
     #   min/max), or "text" (freeform, no validation).
-    # - required: if depends_on is absent or satisfied for a row, a blank
-    #   value is an upload row-error -- but this never affects VERIFIED
-    #   status, which depends only on primary_worker.
+    # - required: when applicable, a blank household answer is a row-error;
+    #   individual answers are required only for VERIFIED decisions. Supplied
+    #   answers are validated for either individual decision. Household
+    #   verification still depends on primary_worker.
     # - depends_on (optional): {key, equals} -- the cell is only
     #   editable/checked when the referenced column's value on that row
     #   equals `equals`.
