@@ -4,7 +4,7 @@ import json
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import transaction
-from django.db.models import Count, Q
+from django.db.models import Count, Exists, OuterRef, Q
 from django.utils import timezone
 
 from individual.data_source import DEFAULT_DATA_SOURCE
@@ -13,7 +13,7 @@ from individual.models import Individual
 from household_validation.apps import HouseholdValidationConfig
 from household_validation.gql_permissions import require_permissions
 from household_validation.individual_snapshots import (
-    SELECTION_ROW_KIND, SELECTION_STORAGE, is_individual_list, iter_selection,
+    SELECTION_ROW_KIND, SELECTION_STORAGE, is_individual_list,
     selected_individual_ids, selection_rows,
 )
 from household_validation.individual_workbook import (
@@ -147,13 +147,22 @@ class IndividualValidationListService:
         }
         return visible_ids, counts
 
+    def _visible_selection_rows(self, batch):
+        # Each outer row already belongs to the issued selection. Correlate its
+        # person directly instead of nesting that selection inside an IN query
+        # and reading it again. EXISTS also avoids duplicates from access joins.
+        visible = Individual.get_queryset(Individual.objects.filter(
+            is_deleted=False,
+        ), self.user).filter(pk=OuterRef("individual_id"))
+        return selection_rows(batch).annotate(_visible=Exists(visible)).filter(_visible=True)
+
     def preview(self, batch_id, first=20, offset=0):
         if type(first) is not int or not 0 <= first <= 100 or type(offset) is not int or offset < 0:
             raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
         batch = self.get_batch(batch_id)
         data = batch.json_ext
-        visible_ids, counts = self._read_context(batch)
-        rows = selection_rows(batch).filter(individual_id__in=visible_ids).values_list("raw_row", flat=True)
+        _, counts = self._read_context(batch)
+        rows = self._visible_selection_rows(batch).values_list("raw_row", flat=True)
         page = rows[offset:offset + first]
         return {
             "batch_id": batch.pk, "eligible_individuals": data["eligible_individuals"],
@@ -165,10 +174,11 @@ class IndividualValidationListService:
 
     def export(self, batch_id):
         batch = self.get_batch(batch_id)
-        visible_ids, counts = self._read_context(batch)
+        _, counts = self._read_context(batch)
         batch._individual_read_counts = counts
         return batch, IndividualValidationListExporter(
-            batch, rows=iter_selection(batch, visible_ids), availability=counts,
+            batch, rows=self._visible_selection_rows(batch).values_list("raw_row", flat=True).iterator(chunk_size=500),
+            availability=counts,
         ).export_bytes()
 
     def parse(self, file_or_bytes):
