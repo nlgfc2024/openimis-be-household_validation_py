@@ -1,14 +1,19 @@
 import base64
 import csv
 import json
+from concurrent.futures import ThreadPoolExecutor
 from io import StringIO
+from threading import Event, local
 from types import SimpleNamespace
 from unittest.mock import PropertyMock, patch
 from uuid import uuid4
 
 import graphene
+from django.apps import apps
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.test import TestCase
+from django.db import close_old_connections, connection, connections
+from django.test import TestCase, TransactionTestCase, skipUnlessDBFeature
+from django.test.utils import CaptureQueriesContext
 
 from core.models import User
 from individual.models import Group, GroupIndividual, Individual
@@ -158,7 +163,7 @@ class IndividualValidationUploadTests(TestCase):
         result = self.uploader.upload(self.serialise(workbook))
         self.assertEqual(before, list(selection_rows(batch).values_list("pk", "raw_row", "status", "version")))
         self.assertEqual(history, HouseholdValidationBatchRow.history.filter(upload_attempt_id__isnull=True).count())
-        rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])
+        rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])["items"]
         self.assertEqual(len(rows), 3)
         self.assertTrue(all(row["status"] in ("APPLIED", "SKIPPED") for row in rows))
 
@@ -192,6 +197,111 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(before, list(Individual.objects.values_list("pk", "json_ext")))
         self.assertEqual(batch.rows.filter(status="ERROR").count(), 3)
 
+    def test_attempt_summaries_keep_counts_without_repeating_row_errors(self):
+        batch, workbook, headers = self.make_upload()
+        sheet = workbook[INDIVIDUAL_SHEET]
+        for _ in range(120):
+            sheet.append([cell.value for cell in sheet[2]])
+        sheet.cell(2, headers["batch_id"], str(uuid4()))
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["errors"], 123)
+        self.assertGreaterEqual(len(result["error_messages"]), 123)
+        batch.refresh_from_db()
+        [summary] = self.uploader.history(batch.pk)
+        self.assertNotIn("error_messages", summary)
+        self.assertEqual(summary["errors"], 123)
+        self.assertEqual(summary["rows_read"], result["rows_read"])
+        self.assertLess(len(json.dumps(summary)), 1000)
+        self.assertLess(len(batch.error_summary), 200)
+        self.assertEqual(batch.rows.filter(upload_attempt_id=result["upload_attempt_id"], status="ERROR").count(), 123)
+        page = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"], offset=120)
+        self.assertEqual(page["count"], 123)
+        self.assertEqual(len(page["items"]), 3)
+        self.assertFalse(page["has_next_page"])
+        self.assertTrue(all("mixed or mismatched" in row["error_message"] for row in page["items"]))
+        report, count = self.uploader.error_report(batch.pk, result["upload_attempt_id"])
+        self.assertEqual(count, 123)
+        self.assertEqual(len(list(csv.DictReader(StringIO(report)))), 123)
+
+    def test_attempt_rows_use_sql_paging_and_total_count_without_crossing_attempts(self):
+        batch, workbook, _ = self.make_upload()
+        result = self.uploader.upload(self.serialise(workbook))
+        second = self.uploader.upload(self.serialise(workbook))
+        attempt_id = result["upload_attempt_id"]
+        HouseholdValidationBatchRow.objects.bulk_create([
+            HouseholdValidationBatchRow(
+                id=uuid4(),
+                batch=batch, upload_attempt_id=attempt_id, row_number=number, status="ERROR",
+                individual=self.standalone, raw_row={"Turnover": -1}, error_message="Invalid turnover",
+                user_created=self.actor, user_updated=self.actor,
+            ) for number in range(5, 130)
+        ])
+        with CaptureQueriesContext(connection) as queries:
+            page = self.uploader.attempt_rows(batch.pk, attempt_id, first=25, offset=100)
+        self.assertEqual(page["count"], 128)
+        self.assertEqual(len(page["items"]), 25)
+        self.assertTrue(page["has_next_page"])
+        self.assertEqual([row["row_number"] for row in page["items"]], list(range(102, 127)))
+        self.assertTrue(any("LIMIT 25 OFFSET 100" in item["sql"] for item in queries.captured_queries))
+        default = self.uploader.attempt_rows(batch.pk, attempt_id)
+        self.assertEqual(len(default["items"]), 20)
+        self.assertEqual(len(self.uploader.attempt_rows(batch.pk, attempt_id, first=100)["items"]), 100)
+        last = self.uploader.attempt_rows(batch.pk, attempt_id, first=25, offset=125)
+        self.assertEqual([row["row_number"] for row in last["items"]], [127, 128, 129])
+        self.assertFalse(last["has_next_page"])
+        empty = self.uploader.attempt_rows(batch.pk, attempt_id, offset=128)
+        self.assertEqual(empty["items"], [])
+        self.assertFalse(empty["has_next_page"])
+        zero = self.uploader.attempt_rows(batch.pk, attempt_id, first=0)
+        self.assertEqual(zero["items"], [])
+        self.assertTrue(zero["has_next_page"])
+        self.assertEqual(self.uploader.attempt_rows(batch.pk, second["upload_attempt_id"])["count"], 3)
+        # Reports must include all errors, independently of the result page size.
+        self.assertEqual(self.uploader.error_report(batch.pk, attempt_id)[1], 125)
+
+    def test_attempt_rows_validate_pagination_even_for_empty_pages(self):
+        batch, workbook, _ = self.make_upload()
+        result = self.uploader.upload(self.serialise(workbook))
+        for kwargs in ({"first": -1}, {"first": 101}, {"first": None}, {"first": True},
+                       {"offset": -1}, {"offset": None}, {"offset": False}, {"offset": 1.5}):
+            with self.subTest(kwargs=kwargs), self.assertRaises(ValidationError):
+                self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"], **kwargs)
+        with self.assertRaises(ValidationError):
+            self.uploader.attempt_rows(batch.pk, uuid4(), offset=10000)
+        self.actor.has_perms = lambda perms: False
+        with self.assertRaises(PermissionDenied):
+            self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"], offset=10000)
+
+    def test_pagination_preserves_redaction_and_graphql_total_count(self):
+        batch, workbook, _ = self.make_upload()
+        result = self.uploader.upload(self.serialise(workbook))
+        private = list(iter_selection(batch))[1]["individual_uuid"]
+        with patch.object(Individual, "get_queryset", side_effect=lambda qs, user: qs.exclude(pk=private)):
+            page = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"], first=1, offset=1)
+            self.assertEqual(page["count"], 3)
+            [row] = page["items"]
+            self.assertTrue(row["redacted"])
+            self.assertIsNone(row["individual_id"])
+            self.assertEqual(row["raw_row"], {})
+            self.assertEqual(row["json_ext"], {})
+        schema = graphene.Schema(query=Query, mutation=Mutation)
+        query = '''query($batch: UUID!, $attempt: UUID!, $first: Int, $offset: Int) {
+          individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt,
+            first: $first, offset: $offset) { count items hasNextPage }
+        }'''
+        variables = {"batch": str(batch.pk), "attempt": str(result["upload_attempt_id"]), "first": 1, "offset": 1}
+        response = schema.execute(query, variable_values=variables, context_value=SimpleNamespace(user=self.actor))
+        self.assertIsNone(response.errors)
+        page = response.data["individualValidationAttemptRows"]
+        self.assertEqual(page["count"], 3)
+        self.assertEqual(len(page["items"]), 1)
+        self.assertTrue(page["hasNextPage"])
+        self.assertEqual(page["items"][0]["row_number"], 3)
+        for invalid in ({"first": 101}, {"offset": -1}):
+            response = schema.execute(query, variable_values={**variables, **invalid},
+                                      context_value=SimpleNamespace(user=self.actor))
+            self.assertTrue(response.errors)
+
     def test_duplicate_and_foreign_individual_rows_cannot_update_other_people(self):
         batch, workbook, headers = self.make_upload(("VERIFIED", "NOT_VERIFIED"))
         sheet = workbook[INDIVIDUAL_SHEET]
@@ -213,7 +323,7 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(result["status"], "PARTIAL_SUCCESS")
         self.assertEqual(result["individuals_updated"], 1)
         self.assertTrue(any("deleted" in error for error in result["error_messages"]))
-        attempt_rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])
+        attempt_rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])["items"]
         self.assertTrue(attempt_rows[1]["redacted"])
         self.assertEqual(attempt_rows[1]["raw_row"], {})
         report, _ = self.uploader.error_report(batch.pk, result["upload_attempt_id"])
@@ -226,7 +336,7 @@ class IndividualValidationUploadTests(TestCase):
             result = self.uploader.upload(self.serialise(workbook))
             self.assertEqual(result["status"], "PARTIAL_SUCCESS")
             self.assertEqual(result["individuals_updated"], 1)
-            rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])
+            rows = self.uploader.attempt_rows(batch.pk, result["upload_attempt_id"])["items"]
             self.assertTrue(rows[1]["redacted"])
             self.assertIsNone(rows[1]["individual_id"])
             self.assertEqual(rows[1]["raw_row"], {})
@@ -383,3 +493,69 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(result.data["individualValidationAttemptRows"]["count"], 3)
         self.assertEqual(result.data["individualValidationErrorReport"]["errorCount"], 1)
         json.dumps(result.data)  # GenericScalar values must also survive HTTP JSON serialization.
+
+
+class IndividualValidationUploadConcurrencyTests(TransactionTestCase):
+    # Flush the complete test assembly with cascading cleanup for legacy FKs.
+    available_apps = [config.name for config in apps.get_app_configs()]
+    generate = fixtures.IndividualWorkbookTests.generate
+    workbook = staticmethod(fixtures.IndividualWorkbookTests.workbook)
+    serialise = staticmethod(fixtures.IndividualWorkbookTests.serialise)
+    make_upload = IndividualValidationUploadTests.make_upload
+
+    def setUp(self):
+        fixtures.IndividualWorkbookTests.setUpTestData.__func__(type(self))
+        fixtures.IndividualWorkbookTests.setUp(self)
+
+    @skipUnlessDBFeature("has_select_for_update")
+    def test_concurrent_uploads_preserve_both_attempt_summaries_and_result_rows(self):
+        from household_validation.individual_workbook import parse_individual_validation_workbook
+
+        batch, workbook, _ = self.make_upload()
+        content = self.serialise(workbook)
+        first_parsing, release_first, second_locking = Event(), Event(), Event()
+        worker = local()
+
+        def pause_first_parse(*args):
+            if worker.number == 1:
+                first_parsing.set()
+                if not release_first.wait(15):
+                    raise TimeoutError("First upload was not released")
+            return parse_individual_validation_workbook(*args)
+
+        def watch_lock(execute, sql, params, many, context):
+            if worker.number == 2 and "FOR UPDATE" in sql:
+                second_locking.set()
+            return execute(sql, params, many, context)
+
+        def upload(number):
+            close_old_connections()
+            worker.number = number
+            try:
+                actor = User.objects.get(pk=self.actor.pk)
+                actor.has_perms = lambda perms: True
+                with connections["default"].execute_wrapper(watch_lock):
+                    return IndividualValidationUploadService(actor).upload(content)
+            finally:
+                connections["default"].close()
+
+        with patch("household_validation.individual_upload.parse_individual_validation_workbook",
+                   side_effect=pause_first_parse), ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(upload, 1)
+            try:
+                self.assertTrue(first_parsing.wait(15), "First upload did not reach parsing")
+                second = pool.submit(upload, 2)
+                self.assertTrue(second_locking.wait(15), "Second upload did not request a batch lock")
+                self.assertFalse(second.done(), "Second upload bypassed the first upload's batch lock")
+            finally:
+                release_first.set()
+            results = [first.result(timeout=20), second.result(timeout=20)]
+        service = IndividualValidationUploadService(self.actor)
+        summaries = service.history(batch.pk)
+        self.assertEqual({item["upload_attempt_id"] for item in summaries},
+                         {str(item["upload_attempt_id"]) for item in results})
+        self.assertEqual([item["individuals_updated"] for item in results], [2, 0])
+        for result in results:
+            self.assertEqual(service.attempt_rows(batch.pk, result["upload_attempt_id"])["count"], 3)
+            self.assertEqual(service.error_report(batch.pk, result["upload_attempt_id"])[1], 0)
+        self.assertEqual(batch.rows.filter(upload_attempt_id__isnull=False).count(), 6)

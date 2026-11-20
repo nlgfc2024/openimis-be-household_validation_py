@@ -106,6 +106,7 @@ class Query(graphene.ObjectType):
     individual_validation_attempt_rows = graphene.Field(
         IndividualValidationAttemptRowsGQLType, batch_id=graphene.UUID(required=True),
         upload_attempt_id=graphene.UUID(required=True),
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
     )
     individual_validation_error_report = graphene.Field(
         IndividualValidationErrorReportGQLType, batch_id=graphene.UUID(required=True),
@@ -168,9 +169,11 @@ class Query(graphene.ObjectType):
         attempts = IndividualValidationUploadService(info.context.user).history(batch_id)
         return IndividualValidationAttemptsGQLType(attempts=attempts, count=len(attempts))
 
-    def resolve_individual_validation_attempt_rows(parent, info, batch_id, upload_attempt_id):
-        rows = IndividualValidationUploadService(info.context.user).attempt_rows(batch_id, upload_attempt_id)
-        return IndividualValidationAttemptRowsGQLType(items=rows, count=len(rows))
+    def resolve_individual_validation_attempt_rows(parent, info, batch_id, upload_attempt_id, first=20, offset=0):
+        page = IndividualValidationUploadService(info.context.user).attempt_rows(
+            batch_id, upload_attempt_id, first=first, offset=offset,
+        )
+        return IndividualValidationAttemptRowsGQLType(**page)
 
     def resolve_individual_validation_error_report(parent, info, batch_id, upload_attempt_id):
         content, count = IndividualValidationUploadService(info.context.user).error_report(batch_id, upload_attempt_id)

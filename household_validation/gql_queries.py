@@ -48,6 +48,7 @@ class IndividualValidationAttemptsGQLType(graphene.ObjectType):
 class IndividualValidationAttemptRowsGQLType(graphene.ObjectType):
     count = graphene.Int()
     items = graphene.List(GenericScalar)
+    has_next_page = graphene.Boolean()
 
 
 class IndividualValidationErrorReportGQLType(graphene.ObjectType):

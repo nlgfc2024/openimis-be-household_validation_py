@@ -39,10 +39,13 @@ class IndividualValidationUploadService:
     def __init__(self, user):
         self.user = user
 
-    def _context(self, batch_id, permissions):
+    def _context(self, batch_id, permissions, for_update=False):
         require_permissions(self.user, permissions, error_class=PermissionDenied)
         try:
-            batch = HouseholdValidationBatch.objects.get(pk=batch_id, is_deleted=False)
+            batches = HouseholdValidationBatch.objects
+            if for_update:
+                batches = batches.select_for_update()
+            batch = batches.get(pk=batch_id, is_deleted=False)
         except (HouseholdValidationBatch.DoesNotExist, ValueError, ValidationError) as exc:
             raise ValidationError("Unknown individual validation batch.") from exc
         if not is_individual_list(batch):
@@ -69,6 +72,7 @@ class IndividualValidationUploadService:
             with transaction.atomic():
                 batch, selected, existing, visible, scoped = self._context(
                     batch_id, HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+                    for_update=not dry_run,
                 )
                 parsed = parse_individual_validation_workbook(workbook, batch)
                 geography = {key: value for key, value in batch.json_ext["filters"].items()
@@ -140,6 +144,7 @@ class IndividualValidationUploadService:
                     return totals
                 attempt = uuid4()
                 uploaded_at = timezone.now()
+                existing_selected = selected & existing
                 for row, person, status, errors, updates, changed in prepared:
                     if status == HouseholdValidationBatchRow.Status.APPLIED and changed:
                         extra = dict(person.json_ext) if isinstance(person.json_ext, dict) else {}
@@ -149,7 +154,7 @@ class IndividualValidationUploadService:
                         totals["individuals_updated"] += 1
                     record = HouseholdValidationBatchRow(
                         batch=batch, upload_attempt_id=attempt, row_number=row.row_number,
-                        individual_id=row.individual_id if row.individual_id in selected & existing else None,
+                        individual_id=row.individual_id if row.individual_id in existing_selected else None,
                         verified=(row.decision == VERIFIED) if row.decision in (VERIFIED, NOT_VERIFIED) else None,
                         status=status, error_message="\n".join(errors) or None,
                         raw_row=_json_snapshot(_audit_value(row.values)),
@@ -161,7 +166,8 @@ class IndividualValidationUploadService:
                 data = dict(batch.json_ext)
                 attempts = dict(data.get("upload_attempts", {}))
                 attempts[str(attempt)] = _json_snapshot({
-                    **totals, "uploaded_at": uploaded_at, "actor_id": str(self.user.id),
+                    **{key: value for key, value in totals.items() if key != "error_messages"},
+                    "uploaded_at": uploaded_at, "actor_id": str(self.user.id),
                     "source_file_name": source_file_name,
                 })
                 data["upload_attempts"] = attempts
@@ -169,7 +175,10 @@ class IndividualValidationUploadService:
                 batch.status = totals["status"]
                 batch.uploaded_at = uploaded_at
                 batch.source_file_name = source_file_name
-                batch.error_summary = "\n".join(totals["error_messages"]) or None
+                batch.error_summary = (
+                    f"{totals['errors']} row(s) failed validation in attempt {attempt}. See attempt rows for details."
+                    if totals["errors"] else None
+                )
                 batch.save(user=self.user)
                 return totals
         finally:
@@ -190,25 +199,35 @@ class IndividualValidationUploadService:
             raise ValidationError("Invalid upload attempt ID.") from exc
         if attempt_id not in (batch.json_ext.get("upload_attempts") or {}):
             raise ValidationError("Unknown upload attempt for this batch.")
-        rows = []
-        for row in batch.rows.filter(upload_attempt_id=attempt_id, is_deleted=False).order_by("row_number"):
+        rows = batch.rows.filter(upload_attempt_id=attempt_id, is_deleted=False).order_by("row_number", "pk")
+        return batch, rows, visible
+
+    @staticmethod
+    def _serialize_rows(rows, visible):
+        for row in rows:
             allowed = str(row.individual_id) in visible
-            rows.append(_json_snapshot({
+            yield _json_snapshot({
                 "id": row.pk, "row_number": row.row_number, "status": row.status,
                 "individual_id": row.individual_id if allowed else None,
                 "raw_row": row.raw_row if allowed else {}, "json_ext": row.json_ext if allowed else {},
                 "error_message": row.error_message if allowed or not row.raw_row
                 else "Row data is not currently accessible.", "redacted": not allowed,
-            }))
-        return batch, rows
+            })
 
-    def attempt_rows(self, batch_id, attempt_id):
-        return self._attempt_rows(
+    def attempt_rows(self, batch_id, attempt_id, first=20, offset=0):
+        if type(first) is not int or not 0 <= first <= 100 or type(offset) is not int or offset < 0:
+            raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
+        _, rows, visible = self._attempt_rows(
             batch_id, attempt_id, HouseholdValidationConfig.gql_query_household_validation_history_perms,
-        )[1]
+        )
+        count = rows.count()
+        return {
+            "items": list(self._serialize_rows(rows[offset:offset + first], visible)),
+            "count": count, "has_next_page": offset + first < count,
+        }
 
     def error_report(self, batch_id, attempt_id):
-        batch, rows = self._attempt_rows(
+        batch, rows, visible = self._attempt_rows(
             batch_id, attempt_id, HouseholdValidationConfig.gql_query_household_validation_error_report_perms,
         )
         headers = ["row_number", "status", "error_message", *IndividualValidationListExporter(batch).columns]
@@ -216,9 +235,8 @@ class IndividualValidationUploadService:
         writer = csv.writer(output)
         writer.writerow(headers)
         count = 0
-        for row in rows:
-            if row["status"] != HouseholdValidationBatchRow.Status.ERROR:
-                continue
+        error_rows = rows.filter(status=HouseholdValidationBatchRow.Status.ERROR).iterator(chunk_size=500)
+        for row in self._serialize_rows(error_rows, visible):
             values = {**row["raw_row"], **{key: row[key] for key in headers[:3]}}
             cells = [values.get(key, "") for key in headers]
             writer.writerow(["'" + value if isinstance(value, str) and value.startswith(("=", "+", "-", "@"))

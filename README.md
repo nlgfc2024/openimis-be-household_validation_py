@@ -577,8 +577,13 @@ individual, batch, row or history record. `wouldUpdate` predicts changed individ
 `individualsUpdated` is zero in a dry run and counts actual writes after commit.
 Submit again with `dryRun: false` to commit; current state is checked again.
 
-Each committed upload uses one transaction and a new `uploadAttemptId`. Valid
-submitted decisions are recorded as APPLIED even if the individual already has
+Each committed upload uses one transaction and a new `uploadAttemptId`. These
+commits lock their batch row before reading its attempt summaries and current
+individual state, so simultaneous uploads for the same batch serialize rather
+than overwrite each other's attempt metadata. Dry runs do not acquire this
+write lock or persist changes; committing still rechecks current state.
+
+Valid submitted decisions are recorded as APPLIED even if the individual already has
 the same values; blank decisions are SKIPPED. Expected row errors are recorded
 as ERROR while other valid rows apply, producing PARTIAL_SUCCESS. All-error files
 are FAILED; a file with no errors is PROCESSED. Unknown batches are rejected and
@@ -594,7 +599,9 @@ Individual history and validation batch rows supply the audit trail.
 ```graphql
 query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
   individualValidationAttempts(batchId: $batch) { count attempts }
-  individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt) { count items }
+  individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt, first: 20, offset: 0) {
+    count items hasNextPage
+  }
   individualValidationErrorReport(batchId: $batch, uploadAttemptId: $attempt) {
     fileName fileBase64 errorCount
   }
@@ -609,6 +616,20 @@ visible to the reader; other rows have `redacted: true`, no individual ID and em
 raw/JSON values. CSV reports use the saved programme columns and the same redaction.
 Deleted or inaccessible people produce individual row errors rather than blocking
 processing of the rest of an authorized upload.
+
+Attempt summaries retain counters, outcome, actor, filename and timing metadata;
+new summaries do not duplicate the full `error_messages` list. The immediate
+upload/dry-run response still includes those messages. Detailed committed errors
+remain on their attempt rows and in the CSV report, with a compact current-attempt
+error summary on the batch.
+
+Attempt rows use SQL pagination: `first` defaults to 20 and accepts integers from
+0 to 100; `offset` defaults to 0 and must be a non-negative integer. Invalid
+ranges are rejected. `count` is the total number of rows in that
+attempt, including redacted rows; `items` is the requested page and `hasNextPage`
+indicates whether more rows remain. Clients that previously assumed all rows were
+returned must paginate. The attempt-specific CSV always includes every error row,
+independent of the result page size, and applies the same current-access redaction.
 
 ---
 
