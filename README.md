@@ -402,8 +402,11 @@ configuration registry and again at startup.
 The individual decision contract is **VERIFIED / NOT_VERIFIED only**. Leading and
 trailing whitespace is trimmed and case normalised. Blank/null decisions skip the
 whole row without changes; unsupported values, including REJECTED and Yes/No, are
-invalid. Submitted decisions must satisfy applicable configured required fields,
-dependencies, types, options and numeric bounds before row updates. Household
+invalid. VERIFIED decisions must satisfy applicable configured required fields.
+NOT_VERIFIED decisions allow blank business answers (for example, when a business
+does not exist or a person cannot be reached); omitted answers preserve stored
+values, subject to the configured dependency rules. Supplied answers for either
+decision must satisfy dependencies, types, options and numeric bounds. Household
 Primary Worker/status rules are unchanged.
 
 The read-only queries below reuse right `958001`. They expose programme metadata
@@ -450,8 +453,7 @@ Ordered identities and descriptive snapshots are stored in existing
 selection rows and their history in chunks of 500 within the same transaction.
 Preview and re-export read the saved values; later registry or configuration
 edits do not change those values. Decision cells start blank, including on
-revalidation lists. Previously issued lists with `json_ext.selection` remain
-readable using their original headers and saved values.
+revalidation lists.
 
 ```graphql
 mutation {
@@ -542,7 +544,9 @@ with `decision is None` must be skipped without applying any fields.
 Parsing uses only the batch's saved columns and identity set, checks protected
 values, rejects unknown/mixed batches, foreign/duplicate IDs, unexpected/missing
 headers and formulas, and enforces applicable types, options, numeric bounds,
-required fields and dependencies. A blank decision skips programme-field
+dependencies and required fields for VERIFIED decisions. NOT_VERIFIED decisions
+may omit business answers. Excel permits blank business cells; parsing enforces
+the decision-specific requiredness. A blank decision skips programme-field
 validation and updates; a submitted invalid row has no parsed updates to apply.
 
 Current deletion and access checks are per submitted row: a deleted, missing or

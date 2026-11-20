@@ -205,6 +205,43 @@ class IndividualWorkbookTests(TestCase):
                 self.assertFalse(batch.rows.filter(upload_attempt_id__isnull=False).exists())
                 self.assertEqual(HouseholdValidationBatchRow.history.count(), row_history)
 
+    def test_only_verified_decisions_require_business_answers(self):
+        batch, content = self.generate(target_count=1)
+        workbook = self.workbook(content)
+        self.assertTrue(all(rule.allow_blank for rule in workbook[INDIVIDUAL_SHEET].data_validations.dataValidation))
+        for decision in (" not_verified ", "VERIFIED"):
+            with self.subTest(decision=decision):
+                self.edit(workbook, decision=decision, validation_notes="Business could not be reached")
+                result = self.service.parse(self.serialise(workbook))
+                self.assertFalse(result.errors)
+                row = result.rows[0]
+                if decision == "VERIFIED":
+                    self.assertTrue(any("Turnover is required" in error for error in row.errors))
+                    self.assertTrue(any("Owns business is required" in error for error in row.errors))
+                else:
+                    self.assertFalse(row.errors)
+                    self.assertEqual(row.decision, "NOT_VERIFIED")
+                    self.assertEqual(row.updates, {})
+                    self.assertEqual(row.notes, "Business could not be reached")
+        self.assertTrue(all(col["required"] for col in batch.json_ext["columns"][:3]))
+
+    def test_not_verified_still_validates_supplied_business_answers(self):
+        for values, expected in (({"Turnover": 101}, "valid number"),
+                                 ({"Owns business": "Maybe"}, "valid option"),
+                                 ({"Business kind": "Retail"}, "only available")):
+            with self.subTest(values=values):
+                _, workbook = self.submitted_workbook(decision="NOT_VERIFIED", **values)
+                result = self.service.parse(self.serialise(workbook))
+                self.assertTrue(any(expected in error for error in result.rows[0].errors))
+                self.assertEqual(result.rows[0].updates, {})
+
+    def test_not_verified_allows_missing_dependent_answer(self):
+        _, workbook = self.submitted_workbook(decision="NOT_VERIFIED", **{"Owns business": "Yes"})
+        result = self.service.parse(self.serialise(workbook))
+        self.assertFalse(result.errors)
+        self.assertFalse(result.rows[0].errors)
+        self.assertEqual(result.rows[0].updates, {"turnover": 25.0, "owns": "Yes"})
+
     def test_snapshot_parser_does_not_accept_current_or_other_programmes_looser_rules(self):
         _, workbook = self.submitted_workbook(Turnover=500, **{"Owns business": "Yes", "Business kind": "Other"})
         loose = deepcopy(COLUMNS)
@@ -609,21 +646,16 @@ class IndividualWorkbookTests(TestCase):
         self.assertEqual(len(page_queries), 1)
         self.assertIn("LIMIT 2 OFFSET 1000", page_queries[0])
 
-    def test_legacy_issued_lists_keep_their_original_headers_and_read_policy(self):
-        legacy_fields = [{"column_name": name, "json_ext_key": name} for name in ("national_id", "gender")]
-        legacy_fields += [{"column_name": name, "location_type": level}
-                          for level, name in (("R", "District"), ("D", "TA"), ("W", "GVH"), ("V", "Village"))]
-        with patch.object(HouseholdValidationConfig, "individual_workbook_fields", {"UMEP": legacy_fields}):
-            batch, content = self.generate(target_count=2)
+    def test_json_only_selection_is_not_a_saved_individual_list(self):
+        batch, content = self.generate(target_count=2)
         batch.json_ext["selection"] = list(iter_selection(batch))
         batch.json_ext.pop("selection_storage")
         batch.json_ext.pop("display_fields")
         batch.save(user=self.actor)
         selection_rows(batch).delete()
-        _, exported = self.service.export(batch.pk)
-        self.assertEqual(list(self.workbook(content)[INDIVIDUAL_SHEET].values),
-                         list(self.workbook(exported)[INDIVIDUAL_SHEET].values))
-        self.assertFalse(self.service.parse(content).errors)
-        Individual.objects.filter(pk=batch.json_ext["selection"][0]["individual_uuid"]).update(is_deleted=True)
-        self.assertEqual(self.service.preview(batch.pk)["available_individuals"], 1)
-        self.assertEqual(len(self.service.parse(content).valid_rows), 1)
+        for read in [self.service.preview, self.service.export]:
+            with self.subTest(read=read.__name__), self.assertRaisesMessage(
+                ValidationError, "Batch is not a saved individual validation list.",
+            ):
+                read(batch.pk)
+        self.assertEqual(self.service.parse(content).errors, ["Batch is not a saved individual validation list."])

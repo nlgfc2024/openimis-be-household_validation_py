@@ -156,15 +156,12 @@ class IndividualValidationListService:
         batch = self.get_batch(batch_id)
         data = batch.json_ext
         visible_ids, counts = self._read_context(batch)
-        if data.get("selection_storage") == SELECTION_STORAGE:
-            rows = selection_rows(batch).filter(individual_id__in=visible_ids).values_list("raw_row", flat=True)
-            page = rows[offset:offset + first]
-        else:
-            page = list(iter_selection(batch, visible_ids))[offset:offset + first]
+        rows = selection_rows(batch).filter(individual_id__in=visible_ids).values_list("raw_row", flat=True)
+        page = rows[offset:offset + first]
         return {
             "batch_id": batch.pk, "eligible_individuals": data["eligible_individuals"],
             "selected_individuals": data["selected_individuals"], "columns": data["columns"],
-            "display_fields": data.get("display_fields"), **counts,
+            "display_fields": data["display_fields"], **counts,
             "items": [{"batch_id": str(batch.pk), **row} for row in page],
             "has_next_page": offset + first < counts["available_individuals"],
         }
