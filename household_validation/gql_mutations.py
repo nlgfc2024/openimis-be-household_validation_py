@@ -161,6 +161,7 @@ class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     households_with_multiple_primary_workers = graphene.Int()
     errors = graphene.Int()
     error_messages = graphene.List(graphene.String)
+    error_codes = graphene.List(graphene.String)
 
 
 class GenerateHouseholdValidationListMutation(graphene.Mutation):

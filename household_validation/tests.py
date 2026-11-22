@@ -82,6 +82,7 @@ from household_validation.services import (
 from household_validation.schema import Query
 from household_validation.upload import (
     InvalidWorkbookRow,
+    PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
     PROJECT_SELECTION_TYPE_INTENT,
     VALIDATION_STATUS_NOT_VERIFIED,
     VALIDATION_LIST_SHEET,
@@ -2905,6 +2906,10 @@ class UploadHardeningTest(TestCase):
             validated.errors,
             ["Row 2: national_id is required for the selected primary worker"],
         )
+        self.assertEqual(
+            validated.invalid_rows[0].error_code,
+            "PRIMARY_WORKER_NATIONAL_ID_REQUIRED",
+        )
         self.assertEqual(validated.invalid_group_keys, frozenset({"group-1"}))
 
     def test_unconfigured_programme_does_not_require_primary_worker_national_id(self):
@@ -3578,6 +3583,7 @@ class UploadHardeningTest(TestCase):
                 InvalidWorkbookRow(
                     uploaded_row=invalid_row,
                     errors=[national_id_error],
+                    error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
                 ),
             ],
             rows_read=2,
@@ -3620,12 +3626,16 @@ class UploadHardeningTest(TestCase):
             invalid_row,
             status=HouseholdValidationBatchRow.Status.ERROR,
             error_message=national_id_error,
-            error_code="VALIDATION_ERROR",
+            error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
         )
         self.assertEqual(result["rows_read"], 2)
         self.assertEqual(result["households_verified"], 0)
         self.assertEqual(result["participants_verified"], 0)
         self.assertEqual(result["errors"], 1)
+        self.assertEqual(
+            result["error_codes"],
+            [PRIMARY_WORKER_NATIONAL_ID_REQUIRED],
+        )
 
     @patch("household_validation.services.parse_validation_workbook")
     def test_upload_counts_only_successful_participants_as_not_verified(

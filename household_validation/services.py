@@ -37,6 +37,7 @@ from household_validation.selection import (
     select_households,
 )
 from household_validation.upload import (
+    PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
     InvalidWorkbookRow,
     build_validation_error_report_csv,
     build_validation_json_ext,
@@ -96,6 +97,10 @@ class HouseholdValidationUploadService:
             "households_with_multiple_primary_workers": 0,
             "errors": len(parsed.errors),
             "error_messages": list(parsed.errors),
+            "error_codes": sorted({
+                invalid_row.error_code
+                for invalid_row in getattr(parsed, "invalid_rows", [])
+            }),
         }
         participant_update_group_keys = (
             self._accepted_validation_group_keys(parsed.rows)
@@ -192,7 +197,7 @@ class HouseholdValidationUploadService:
                     invalid_row.uploaded_row,
                     status=HouseholdValidationBatchRow.Status.ERROR,
                     error_message="; ".join(invalid_row.errors),
-                    error_code="VALIDATION_ERROR",
+                    error_code=invalid_row.error_code,
                 )
             for group_key, verified in verification_statuses.items():
                 if verified is True and self._replace_primary_worker(
@@ -330,7 +335,11 @@ class HouseholdValidationUploadService:
             group_key = self._uploaded_group_key(uploaded_row)
             if group_key:
                 invalid_group_keys.add(group_key)
-            invalid_rows.append(InvalidWorkbookRow(uploaded_row, [error]))
+            invalid_rows.append(InvalidWorkbookRow(
+                uploaded_row,
+                [error],
+                error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+            ))
 
         return replace(
             parsed,
