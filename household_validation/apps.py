@@ -21,15 +21,10 @@ RETIRED_CONFIG_KEYS = (
     "business_type_options",
 )
 
-# A generic, minimal "Type of Business" defaults
-DEFAULT_BUSINESS_TYPE_OPTIONS = [
-    "Crop farming",
-    "Livestock farming",
-    "Grocery shop",
-    "Tailoring",
-    "Transport services",
-    "Other businesses",
-]
+REMOVED_PROGRAM_EXPORT_COLUMN_KEYS = frozenset({
+    "business_type",
+    "business_duration",
+})
 
 RIGHT_HOUSEHOLD_VALIDATION_QUERY_EXPORT = 958001
 RIGHT_HOUSEHOLD_VALIDATION_UPLOAD = 958002
@@ -159,39 +154,19 @@ DEFAULT_CONFIG = {
                 "options": ["Yes", "No"],
                 "required": False,
             },
-            {
-                "key": "business_type",
-                "column_name": "Type of Business",
-                "target_individual_json_ext_key": "type_of_business",
-                "type": "select",
-                "options": list(DEFAULT_BUSINESS_TYPE_OPTIONS),
-                "required": True,
-                "depends_on": {"key": "has_business", "equals": "Yes"},
-            },
-            {
-                "key": "business_duration",
-                "column_name": "Business Period (in years)",
-                "target_individual_json_ext_key": "business_period",
-                "type": "number",
-                "min": 0,
-                "max": 100,
-                "required": True,
-                "depends_on": {"key": "has_business", "equals": "Yes"},
-            },
         ],
     },
     # Deployment override for just a column's `options` list, keyed by the
-    # column's `key` (e.g. "business_type") -- not by program. Applies
+    # column's `key` -- not by program. Applies
     # wherever that key appears, across every program's column list, in both
     # export (ExcelValidationListExporter) and upload
     # (upload.py::_column_registry) so the two stay consistent.
     #
-    # Exists so a deployment that's otherwise happy with the built-in PWP
-    # defaults (the common case) can swap in its own business types --
-    # or any other select column's options -- without having to redeclare
+    # Exists so a deployment can swap a select column's options without
+    # having to redeclare
     # program_specific_export_columns (or program_eligibility_rules) at all:
     #
-    #   {"export_column_options_overrides": {"business_type": ["Rice farming", "Retail shop", "..."]}}
+    #   {"export_column_options_overrides": {"custom_choice": ["Option A", "Option B"]}}
     #
     # is a complete, valid ModuleConfiguration override on its own. Applied
     # via apps.py::apply_column_option_overrides.
@@ -277,4 +252,11 @@ def apply_column_option_overrides(columns):
         if col.get("type") == "select" and col["key"] in overrides
         else col
         for col in columns
+    ]
+
+
+def remove_retired_program_export_columns(columns):
+    return [
+        column for column in columns
+        if column.get("key") not in REMOVED_PROGRAM_EXPORT_COLUMN_KEYS
     ]

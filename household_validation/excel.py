@@ -446,7 +446,8 @@ class ExcelValidationListExporter:
             promptTitle="One Primary Worker only",
             prompt=(
                 'Only one member per household can be YES. To change the '
-                'Primary Worker, set the current worker to NO or clear it first.'
+                'Primary Worker, set the current worker to NO or clear it first. '
+                'Enter national_id before selecting YES.'
             ),
             showErrorMessage=True,
             errorStyle="stop",
@@ -464,6 +465,18 @@ class ExcelValidationListExporter:
             f"{primary_worker_col}2:{primary_worker_col}{max_row}",
             FormulaRule(
                 formula=[f'AND(${primary_worker_col}2="YES",{worker_count}>1)'],
+                fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
+                font=Font(color="FF9C0006"),
+            ),
+        )
+        national_id_col = self._column_letter("national_id")
+        worksheet.conditional_formatting.add(
+            f"{national_id_col}2:{national_id_col}{max_row}",
+            FormulaRule(
+                formula=[
+                    f'AND(UPPER(TRIM(${primary_worker_col}2&""))="YES",'
+                    f'LEN(TRIM(${national_id_col}2&""))=0)'
+                ],
                 fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
                 font=Font(color="FF9C0006"),
             ),

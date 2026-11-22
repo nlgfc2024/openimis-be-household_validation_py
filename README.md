@@ -358,12 +358,17 @@ program_eligibility_rules["PWP"]["selection_strategy"]
 
 instead.
 
-Also retired, with no replacement needed (folded into `program_specific_export_columns`):
+Also retired, with no replacement needed:
 
 ```text
 business_columns_enabled
 business_type_options
 ```
+
+The PWP validation workbook retains the `Does member have a business` field.
+`Type of Business` and `Business Period (in years)` are no longer exported,
+even if they remain in saved configuration. Older workbooks containing those
+columns can still be uploaded.
 
 The module logs warnings when retired configuration keys are detected.
 
@@ -714,11 +719,11 @@ Example:
 
 ```python
 {
-    "key": "business_type",
-    "column_name": "Type of Business",
-    "target_individual_json_ext_key": "type_of_business",
+    "key": "custom_choice",
+    "column_name": "Custom Choice",
+    "target_individual_json_ext_key": "custom_choice",
     "type": "select",
-    "options": ["Crop farming", "Livestock farming", "Grocery shop"],
+    "options": ["Option A", "Option B"],
     "required": True
 }
 ```
@@ -767,10 +772,9 @@ For simple dropdown customizations:
 ```json
 {
   "export_column_options_overrides": {
-    "business_type": [
-      "Rice farming",
-      "Retail shop",
-      "Transport services"
+    "custom_choice": [
+      "Option A",
+      "Option B"
     ]
   }
 }

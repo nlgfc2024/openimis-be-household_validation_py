@@ -13,6 +13,7 @@ from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService, IndividualService
 from project_social_protection.models import Project
 
+from household_validation.apps import remove_retired_program_export_columns
 from household_validation.geography import ValidationGeographyMixin
 from household_validation.programmes import HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns
 from household_validation.excel import (
@@ -180,6 +181,14 @@ class HouseholdValidationUploadService:
         successful_rows_by_group = {}
 
         with transaction.atomic():
+            for invalid_row in getattr(parsed, "invalid_rows", []):
+                self._save_batch_row(
+                    batch,
+                    invalid_row.uploaded_row,
+                    status=HouseholdValidationBatchRow.Status.ERROR,
+                    error_message="; ".join(invalid_row.errors),
+                    error_code="VALIDATION_ERROR",
+                )
             for group_key, verified in verification_statuses.items():
                 if verified is True and self._replace_primary_worker(
                     uploaded_rows_by_group[group_key]
@@ -472,7 +481,13 @@ class HouseholdValidationUploadService:
     def _batch_id(self, parsed):
         batch_ids = {
             row.values.get("batch_id")
-            for row in parsed.rows
+            for row in [
+                *parsed.rows,
+                *[
+                    invalid_row.uploaded_row
+                    for invalid_row in getattr(parsed, "invalid_rows", [])
+                ],
+            ]
             if row.values.get("batch_id")
         }
         if len(batch_ids) != 1:
@@ -1143,7 +1158,9 @@ class EligibleHouseholdSelectionService(ValidationGeographyMixin):
         return rule
 
     def _resolve_export_columns(self, benefit_plan_code):
-        return resolve_programme_columns(benefit_plan_code)
+        return remove_retired_program_export_columns(
+            resolve_programme_columns(benefit_plan_code)
+        )
 
     def _build_household(self, group):
         groupindividuals = [
