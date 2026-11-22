@@ -21,10 +21,15 @@ RETIRED_CONFIG_KEYS = (
     "business_type_options",
 )
 
-REMOVED_PROGRAM_EXPORT_COLUMN_KEYS = frozenset({
-    "business_type",
-    "business_duration",
-})
+# A generic, minimal "Type of Business" defaults.
+DEFAULT_BUSINESS_TYPE_OPTIONS = [
+    "Crop farming",
+    "Livestock farming",
+    "Grocery shop",
+    "Tailoring",
+    "Transport services",
+    "Other businesses",
+]
 
 RIGHT_HOUSEHOLD_VALIDATION_QUERY_EXPORT = 958001
 RIGHT_HOUSEHOLD_VALIDATION_UPLOAD = 958002
@@ -116,6 +121,9 @@ DEFAULT_CONFIG = {
     "program_eligibility_rules": {
         "PWP": {
             "member_flag": "fit_for_work",
+            # Opt in explicitly. Other programmes remain unchanged unless
+            # their own rule enables this requirement.
+            "require_primary_worker_national_id": True,
             "selection_strategy": {
                 "female_headed_percentage": 40,
                 "youth_headed_percentage": 40,
@@ -153,6 +161,25 @@ DEFAULT_CONFIG = {
                 "type": "select",
                 "options": ["Yes", "No"],
                 "required": False,
+            },
+            {
+                "key": "business_type",
+                "column_name": "Type of Business",
+                "target_individual_json_ext_key": "type_of_business",
+                "type": "select",
+                "options": list(DEFAULT_BUSINESS_TYPE_OPTIONS),
+                "required": True,
+                "depends_on": {"key": "has_business", "equals": "Yes"},
+            },
+            {
+                "key": "business_duration",
+                "column_name": "Business Period (in years)",
+                "target_individual_json_ext_key": "business_period",
+                "type": "number",
+                "min": 0,
+                "max": 100,
+                "required": True,
+                "depends_on": {"key": "has_business", "equals": "Yes"},
             },
         ],
     },
@@ -252,11 +279,4 @@ def apply_column_option_overrides(columns):
         if col.get("type") == "select" and col["key"] in overrides
         else col
         for col in columns
-    ]
-
-
-def remove_retired_program_export_columns(columns):
-    return [
-        column for column in columns
-        if column.get("key") not in REMOVED_PROGRAM_EXPORT_COLUMN_KEYS
     ]

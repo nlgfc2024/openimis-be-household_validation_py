@@ -303,6 +303,7 @@ Defines:
 "program_eligibility_rules": {
     "PWP": {
         "member_flag": "fit_for_work",
+        "require_primary_worker_national_id": True,
         "selection_strategy": {
             "female_headed_percentage": 40,
             "youth_headed_percentage": 40,
@@ -322,7 +323,12 @@ member_flag
 member_min_age
 member_max_age
 priority_flag
+require_primary_worker_national_id
 ```
+
+`require_primary_worker_national_id` is `false` unless explicitly enabled for
+the programme. When enabled, a selected primary worker must have a national ID
+either in the uploaded workbook or already on their Individual record.
 
 #### Selection Strategy
 
@@ -358,17 +364,12 @@ program_eligibility_rules["PWP"]["selection_strategy"]
 
 instead.
 
-Also retired, with no replacement needed:
+Also retired, with no replacement needed (folded into `program_specific_export_columns`):
 
 ```text
 business_columns_enabled
 business_type_options
 ```
-
-The PWP validation workbook retains the `Does member have a business` field.
-`Type of Business` and `Business Period (in years)` are no longer exported,
-even if they remain in saved configuration. Older workbooks containing those
-columns can still be uploaded.
 
 The module logs warnings when retired configuration keys are detected.
 
@@ -719,11 +720,11 @@ Example:
 
 ```python
 {
-    "key": "custom_choice",
-    "column_name": "Custom Choice",
-    "target_individual_json_ext_key": "custom_choice",
+    "key": "business_type",
+    "column_name": "Type of Business",
+    "target_individual_json_ext_key": "type_of_business",
     "type": "select",
-    "options": ["Option A", "Option B"],
+    "options": ["Crop farming", "Livestock farming", "Grocery shop"],
     "required": True
 }
 ```
@@ -772,9 +773,10 @@ For simple dropdown customizations:
 ```json
 {
   "export_column_options_overrides": {
-    "custom_choice": [
-      "Option A",
-      "Option B"
+    "business_type": [
+      "Rice farming",
+      "Retail shop",
+      "Transport services"
     ]
   }
 }

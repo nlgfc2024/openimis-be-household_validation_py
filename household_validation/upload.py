@@ -17,11 +17,7 @@ from household_validation.wealth import get_household_wealth_quintile
 from household_validation.verification import (
     PARTICIPANT_STATUS_COLUMN, HOUSEHOLD_STATUS_COLUMN, YES_VALUES, NO_VALUES,
 )
-from household_validation.apps import (
-    REMOVED_PROGRAM_EXPORT_COLUMN_KEYS,
-    HouseholdValidationConfig,
-    apply_column_option_overrides,
-)
+from household_validation.apps import HouseholdValidationConfig, apply_column_option_overrides
 
 
 VALIDATION_LIST_SHEET = "Validation List"
@@ -157,14 +153,6 @@ def parse_validation_workbook(file_or_bytes):
         headers = _read_headers(worksheet, extra_columns)
     except ValueError as exc:
         return WorkbookParseResult(errors=[str(exc)])
-    column_registry = {
-        key: column
-        for key, column in column_registry.items()
-        if (
-            key not in REMOVED_PROGRAM_EXPORT_COLUMN_KEYS
-            or column["column_name"] in headers
-        )
-    }
     missing_columns = [column for column in REQUIRED_UPLOAD_COLUMNS if column not in headers]
     if missing_columns:
         return WorkbookParseResult(
@@ -210,10 +198,6 @@ def parse_validation_workbook(file_or_bytes):
             values.get("primary_worker")
         ) is None:
             row_errors.append(f"Row {row_number}: primary_worker must be YES or NO")
-        if primary_worker is True and not _clean(values.get("national_id")):
-            row_errors.append(
-                f"Row {row_number}: Please fill in a valid national_id for the selected primary worker"
-            )
         if values.get("validation_date") and validation_date is None:
             row_errors.append(f"Row {row_number}: validation_date is invalid")
         if project_label and not project_id:

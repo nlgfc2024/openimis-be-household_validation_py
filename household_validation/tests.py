@@ -86,6 +86,7 @@ from household_validation.upload import (
     VALIDATION_STATUS_NOT_VERIFIED,
     VALIDATION_LIST_SHEET,
     UploadedValidationRow,
+    WorkbookParseResult,
     build_validation_error_report_csv,
     build_validation_json_ext,
     member_structural_errors,
@@ -1898,13 +1899,13 @@ class ValidationUploadParserTest(LegacyBusinessColumnsTestMixin, TestCase):
         self.assertEqual(parsed.rows[0].primary_worker, True)
         self.assertEqual(PROJECT_SELECTION_TYPE_INTENT, "INTENT")
 
-    def test_primary_worker_requires_national_id(self):
+    def test_parser_does_not_globally_require_primary_worker_national_id(self):
         columns = _all_columns()
-        for primary_worker, national_id, valid in (
-            ("YES", None, False),
-            ("YES", " NAT-001 ", True),
-            ("NO", None, True),
-            (None, None, True),
+        for primary_worker, national_id in (
+            ("YES", None),
+            ("YES", " NAT-001 "),
+            ("NO", None),
+            (None, None),
         ):
             with self.subTest(primary_worker=primary_worker, national_id=national_id):
                 workbook = self._upload_workbook()
@@ -1914,23 +1915,7 @@ class ValidationUploadParserTest(LegacyBusinessColumnsTestMixin, TestCase):
 
                 parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
-                if valid:
-                    self.assertEqual(parsed.errors, [])
-                else:
-                    self.assertEqual(parsed.rows, [])
-                    self.assertEqual(
-                        parsed.errors,
-                        [
-                            "Row 2: Please fill in a valid national_id for the selected primary worker"
-                        ],
-                    )
-                    self.assertEqual(len(parsed.invalid_rows), 1)
-                    self.assertEqual(
-                        parsed.invalid_rows[0].errors,
-                        parsed.errors,
-                    )
-                    self.assertEqual(parsed.error_row_numbers, frozenset({2}))
-                    self.assertEqual(parsed.invalid_group_keys, frozenset({"group-1"}))
+                self.assertEqual(parsed.errors, [])
 
     def test_removed_business_columns_are_optional_when_absent_from_workbook(self):
         workbook = self._upload_workbook(extra_columns=[PWP_EXPORT_COLUMNS[0]])
@@ -2082,6 +2067,29 @@ class ValidationUploadParserTest(LegacyBusinessColumnsTestMixin, TestCase):
 
 
 class ExcelValidationListExporterTest(LegacyBusinessColumnsTestMixin, TestCase):
+    def test_export_highlights_blank_national_id_only_when_programme_requires_it(self):
+        workbook = ExcelValidationListExporter(
+            self._selection_result(member_count=2),
+            "batch-1",
+            require_primary_worker_national_id=True,
+        ).export_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        worker_col = self._cell(worksheet, "primary_worker").column_letter
+        national_id_col = self._cell(worksheet, "national_id").column_letter
+        required_formula = (
+            f'AND(UPPER(TRIM(${worker_col}2&""))="YES",'
+            f'LEN(TRIM(${national_id_col}2&""))=0)'
+        )
+
+        self.assertTrue(any(
+            str(formatting.sqref) == f"{national_id_col}2:{national_id_col}3"
+            and any(
+                rule.formula == [required_formula]
+                for rule in worksheet.conditional_formatting[formatting]
+            )
+            for formatting in worksheet.conditional_formatting
+        ))
+
     def test_export_without_extra_columns_preserves_core_workbook_and_upload(self):
         from household_validation.excel import (
             PRIMARY_WORKER_ANSWERS_RANGE, PRIMARY_WORKER_NO_RANGE,
@@ -2122,22 +2130,9 @@ class ExcelValidationListExporterTest(LegacyBusinessColumnsTestMixin, TestCase):
         # Only the primary-worker and project dropdowns exist; no extra columns.
         rules = worksheet.data_validations.dataValidation
         self.assertEqual(len(rules), 2)
-        self.assertEqual(len(worksheet.conditional_formatting), 2)
+        self.assertEqual(len(worksheet.conditional_formatting), 1)
         self.assertTrue(any("HouseholdPrimaryWorkerAnswers" in rule.formula1 for rule in rules))
         self.assertTrue(any(rule.formula1 == "'Project Options'!$C$2:$C$2" for rule in rules))
-        national_id_col = self._cell(worksheet, "national_id").column_letter
-        national_id_required_formula = (
-            f'AND(UPPER(TRIM(${worker_col}2&""))="YES",'
-            f'LEN(TRIM(${national_id_col}2&""))=0)'
-        )
-        self.assertTrue(any(
-            str(formatting.sqref) == f"{national_id_col}2:{national_id_col}3"
-            and any(
-                rule.formula == [national_id_required_formula]
-                for rule in worksheet.conditional_formatting[formatting]
-            )
-            for formatting in worksheet.conditional_formatting
-        ))
         self.assertEqual(set(workbook.defined_names), {PRIMARY_WORKER_ANSWERS_RANGE, PRIMARY_WORKER_NO_RANGE})
         for name, reference in (
             (PRIMARY_WORKER_ANSWERS_RANGE, "$E$2:$E$3"),
@@ -2877,6 +2872,48 @@ class UploadHardeningTest(TestCase):
             code="HH-001",
             _prefetched_objects_cache={"groupindividuals": members},
         )
+
+    def test_configured_national_id_requirement_accepts_stored_individual_id(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "PWP"})
+        group_individual = SimpleNamespace(
+            individual=SimpleNamespace(json_ext={"national_id": "NAT-001"})
+        )
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, batch)
+
+        self.assertEqual(validated.rows, [row])
+        self.assertEqual(validated.errors, [])
+
+    def test_configured_national_id_requirement_rejects_when_upload_and_registry_are_blank(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "PWP"})
+        group_individual = SimpleNamespace(individual=SimpleNamespace(json_ext={}))
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, batch)
+
+        self.assertEqual(validated.rows, [])
+        self.assertEqual(
+            validated.errors,
+            ["Row 2: national_id is required for the selected primary worker"],
+        )
+        self.assertEqual(validated.invalid_group_keys, frozenset({"group-1"}))
+
+    def test_unconfigured_programme_does_not_require_primary_worker_national_id(self):
+        row = self._uploaded_row(2, "member-1", True)
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "OTHER"})
+        service = HouseholdValidationUploadService()
+
+        self.assertEqual(service._validate_primary_worker_national_ids(parsed, batch), parsed)
 
     def test_primary_worker_preflight_ignores_stored_value_for_blank_cell(self):
         group = self._group_with_primary_workers(True, False)

@@ -13,9 +13,11 @@ from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService, IndividualService
 from project_social_protection.models import Project
 
-from household_validation.apps import remove_retired_program_export_columns
 from household_validation.geography import ValidationGeographyMixin
-from household_validation.programmes import HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns
+from household_validation.programmes import (
+    HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns,
+    requires_primary_worker_national_id,
+)
 from household_validation.excel import (
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
@@ -35,6 +37,7 @@ from household_validation.selection import (
     select_households,
 )
 from household_validation.upload import (
+    InvalidWorkbookRow,
     build_validation_error_report_csv,
     build_validation_json_ext,
     member_structural_errors,
@@ -74,6 +77,13 @@ class HouseholdValidationUploadService:
         self._member_details_changed_group_ids = set()
         self._upload_attempt_id = None
         parsed = parse_validation_workbook(file_or_bytes)
+        batch = (
+            self._existing_household_batch(self._batch_id(parsed))
+            if dry_run
+            else self._get_or_create_batch(parsed, source_file_name=source_file_name)
+        )
+        if batch is not None:
+            parsed = self._validate_primary_worker_national_ids(parsed, batch)
         totals = {
             "rows_read": parsed.rows_read,
             "households_verified": 0,
@@ -152,7 +162,6 @@ class HouseholdValidationUploadService:
             and self._uploaded_group_key(row) not in primary_worker_rejections
         })
         if dry_run:
-            self._existing_household_batch(self._batch_id(parsed))
             totals["households_verified"] = sum(status == VERIFIED for status in decisions.values())
             totals["households_not_verified"] = sum(status == NOT_VERIFIED for status in decisions.values())
             for status, key in ((VERIFIED, "participants_verified"), (NOT_VERIFIED, "participants_not_verified")):
@@ -164,10 +173,6 @@ class HouseholdValidationUploadService:
             return totals
 
         self._upload_attempt_id = uuid4()
-        batch = self._get_or_create_batch(
-            parsed,
-            source_file_name=source_file_name,
-        )
         totals["batch_id"] = batch.id
         totals["upload_attempt_id"] = self._upload_attempt_id
         uploaded_at = timezone.now()
@@ -282,6 +287,59 @@ class HouseholdValidationUploadService:
             for group_key, is_valid in group_is_valid.items()
             if is_valid
         }
+
+    def _validate_primary_worker_national_ids(self, parsed, batch):
+        """Apply the programme rule after resolving the uploaded batch.
+
+        The parser deliberately stays database-free. Here we can determine the
+        programme from the generated batch and accept an ID already stored on
+        the selected member when the workbook cell is blank.
+        """
+        benefit_plan_code = (batch.json_ext or {}).get("benefit_plan_code")
+        if not requires_primary_worker_national_id(benefit_plan_code):
+            return parsed
+
+        rows = []
+        invalid_rows = list(parsed.invalid_rows)
+        errors = list(parsed.errors)
+        error_row_numbers = set(parsed.error_row_numbers)
+        invalid_group_keys = set(parsed.invalid_group_keys)
+
+        for uploaded_row in parsed.rows:
+            if uploaded_row.primary_worker is not True:
+                rows.append(uploaded_row)
+                continue
+            _, _, group_individual, _ = self._resolve_row(uploaded_row)
+            individual = getattr(group_individual, "individual", None)
+            stored_national_id = self._normalize_national_id(
+                (getattr(individual, "json_ext", None) or {}).get("national_id")
+            )
+            uploaded_national_id = self._normalize_national_id(
+                uploaded_row.values.get("national_id")
+            )
+            if uploaded_national_id or stored_national_id:
+                rows.append(uploaded_row)
+                continue
+
+            error = (
+                f"Row {uploaded_row.row_number}: national_id is required "
+                "for the selected primary worker"
+            )
+            errors.append(error)
+            error_row_numbers.add(uploaded_row.row_number)
+            group_key = self._uploaded_group_key(uploaded_row)
+            if group_key:
+                invalid_group_keys.add(group_key)
+            invalid_rows.append(InvalidWorkbookRow(uploaded_row, [error]))
+
+        return replace(
+            parsed,
+            rows=rows,
+            invalid_rows=invalid_rows,
+            errors=errors,
+            error_row_numbers=frozenset(error_row_numbers),
+            invalid_group_keys=frozenset(invalid_group_keys),
+        )
 
     def _primary_worker_verification_statuses(
         self,
@@ -1158,9 +1216,7 @@ class EligibleHouseholdSelectionService(ValidationGeographyMixin):
         return rule
 
     def _resolve_export_columns(self, benefit_plan_code):
-        return remove_retired_program_export_columns(
-            resolve_programme_columns(benefit_plan_code)
-        )
+        return resolve_programme_columns(benefit_plan_code)
 
     def _build_household(self, group):
         groupindividuals = [

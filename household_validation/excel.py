@@ -194,11 +194,19 @@ def build_rejected_households_workbook_bytes(rows):
 
 
 class ExcelValidationListExporter:
-    def __init__(self, selection_result, batch_id, projects=None, additional_columns=None):
+    def __init__(
+        self,
+        selection_result,
+        batch_id,
+        projects=None,
+        additional_columns=None,
+        require_primary_worker_national_id=False,
+    ):
         self.selection_result = selection_result
         self.batch_id = batch_id
         self.projects = projects or []
         self.additional_columns = additional_columns or []
+        self.require_primary_worker_national_id = require_primary_worker_national_id
         self._column_by_key = {col["key"]: col for col in self.additional_columns}
         insert_at = EXCEL_COLUMNS.index(EXTRA_COLUMNS_INSERT_AFTER) + 1
         self.columns = (
@@ -446,8 +454,9 @@ class ExcelValidationListExporter:
             promptTitle="One Primary Worker only",
             prompt=(
                 'Only one member per household can be YES. To change the '
-                'Primary Worker, set the current worker to NO or clear it first. '
-                'Enter national_id before selecting YES.'
+                'Primary Worker, set the current worker to NO or clear it first.'
+                + (' Enter national_id before selecting YES.'
+                   if self.require_primary_worker_national_id else '')
             ),
             showErrorMessage=True,
             errorStyle="stop",
@@ -469,18 +478,19 @@ class ExcelValidationListExporter:
                 font=Font(color="FF9C0006"),
             ),
         )
-        national_id_col = self._column_letter("national_id")
-        worksheet.conditional_formatting.add(
-            f"{national_id_col}2:{national_id_col}{max_row}",
-            FormulaRule(
-                formula=[
-                    f'AND(UPPER(TRIM(${primary_worker_col}2&""))="YES",'
-                    f'LEN(TRIM(${national_id_col}2&""))=0)'
-                ],
-                fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
-                font=Font(color="FF9C0006"),
-            ),
-        )
+        if self.require_primary_worker_national_id:
+            national_id_col = self._column_letter("national_id")
+            worksheet.conditional_formatting.add(
+                f"{national_id_col}2:{national_id_col}{max_row}",
+                FormulaRule(
+                    formula=[
+                        f'AND(UPPER(TRIM(${primary_worker_col}2&""))="YES",'
+                        f'LEN(TRIM(${national_id_col}2&""))=0)'
+                    ],
+                    fill=PatternFill(fill_type="solid", fgColor="FFFFC7CE"),
+                    font=Font(color="FF9C0006"),
+                ),
+            )
 
         project_count = len([project for project in self.projects if self._project_name(project)])
         if project_count:
