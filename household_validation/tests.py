@@ -362,13 +362,13 @@ class ColumnOptionOverridesTest(TestCase):
 class LegacyBusinessColumnsTestMixin:
     def setUp(self):
         super().setUp()
-        patcher = patch.object(
-            HouseholdValidationConfig,
-            "program_specific_export_columns",
-            {"PWP": PWP_EXPORT_COLUMNS},
-        )
-        patcher.start()
-        self.addCleanup(patcher.stop)
+        for field, value in (
+            ("program_specific_export_columns", {"PWP": PWP_EXPORT_COLUMNS}),
+            ("export_column_options_overrides", {}),
+        ):
+            patcher = patch.object(HouseholdValidationConfig, field, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
 class RejectedBatchRowsQueryTest(TestCase):
