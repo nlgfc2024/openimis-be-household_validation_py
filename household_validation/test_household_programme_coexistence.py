@@ -67,22 +67,36 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
         self.assertIsNone(result.errors, result.errors)
         return result.data
 
-    def generate_workbook(self, code):
+    def generate_workbook(self, code=None):
         self.person.json_ext["data_source"] = "sctp" if code == "UPG" else "pwp"
         self.person.save(user=self.actor)
-        generated = self.gql('''mutation($code: String!, $village: String!) {
-          generateHouseholdValidationList(benefitPlanCode: $code, villageCode: $village, targetCount: 1) {
-            batchId fileBase64 selectedHouseholds selectedIndividuals
-          }
-        }''', {"code": code, "village": self.village.code})["generateHouseholdValidationList"]
+        if code is None:
+            # The PWP screen omits benefitPlanCode entirely.
+            query = '''mutation($village: String!) {
+              generateHouseholdValidationList(villageCode: $village, targetCount: 1) {
+                batchId fileBase64 selectedHouseholds selectedIndividuals
+              }
+            }'''
+            variables = {"village": self.village.code}
+        else:
+            query = '''mutation($code: String!, $village: String!) {
+              generateHouseholdValidationList(benefitPlanCode: $code, villageCode: $village, targetCount: 1) {
+                batchId fileBase64 selectedHouseholds selectedIndividuals
+              }
+            }'''
+            variables = {"code": code, "village": self.village.code}
+        generated = self.gql(query, variables)["generateHouseholdValidationList"]
         self.assertEqual((generated["selectedHouseholds"], generated["selectedIndividuals"]), (1, 1))
         workbook = self.workbook(base64.b64decode(generated["fileBase64"]))
         sheet = workbook[VALIDATION_LIST_SHEET]
         headers = {cell.value: cell.column for cell in sheet[1]}
         return generated, workbook, headers
 
-    def round_trip(self, code):
+    def round_trip(self, code=None):
         generated, workbook, headers = self.generate_workbook(code)
+        batch = HouseholdValidationBatch.objects.get(pk=generated["batchId"])
+        self.assertEqual(batch.json_ext["benefit_plan_code"], code)
+        code = code or "PWP"
         sheet = workbook[VALIDATION_LIST_SHEET]
         self.assertIn("primary_worker", headers)
         self.assertNotIn("decision", headers)
@@ -134,6 +148,12 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
 
     def test_pwp_round_trip_with_individual_programme_enabled(self):
         self.round_trip("PWP")
+
+    def test_pwp_round_trip_without_benefit_plan_code_with_individual_programme_enabled(self):
+        self.round_trip()
+
+    def test_pwp_round_trip_with_empty_benefit_plan_code_with_individual_programme_enabled(self):
+        self.round_trip("")
 
     def test_upg_round_trip_with_individual_programme_enabled(self):
         self.round_trip("UPG")

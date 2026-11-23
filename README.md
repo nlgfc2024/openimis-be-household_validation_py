@@ -425,12 +425,13 @@ Primary Worker/status rules are unchanged.
 
 Household uploads exclude individual programme columns from their registry. A
 known generated household batch selects columns from its stored programme code;
-required fields remain enforced even if their header is removed. Upload fails
-with a configuration error if that programme no longer has configured columns. Older household
-files without issued programme metadata retain the existing permissive merge of
-household definitions. Individual workbooks continue to use their saved column
-snapshots. This prevents enabling UMEP from adding unrelated required fields to
-PWP, UPG or RMEP uploads, or loosening their select options.
+an empty or null code uses the default PWP columns, matching list generation.
+Required fields remain enforced even if their header is removed. Upload fails
+with a configuration error if an explicit programme code no longer has configured
+columns. Older household files without issued programme metadata retain the
+existing permissive merge of household definitions. Individual workbooks continue
+to use their saved column snapshots. This prevents enabling UMEP from adding
+unrelated required fields to PWP, UPG or RMEP uploads, or loosening their select options.
 
 The read-only queries below reuse right `958001`. They expose programme metadata
 and current candidates; candidate results are not a saved workbook list.

@@ -141,8 +141,9 @@ def _column_registry(benefit_plan_code=None):
     from household_validation.programmes import INDIVIDUAL, programme_rules, resolve_programme_columns
 
     if benefit_plan_code is not None:
-        columns = resolve_programme_columns(benefit_plan_code) if benefit_plan_code else []
-        if not columns:
+        # PWP generation omits the code; use the same default columns as export.
+        columns = resolve_programme_columns(benefit_plan_code)
+        if benefit_plan_code and not columns:
             raise ValidationError(
                 f"No household upload column configuration for issued benefit plan code '{benefit_plan_code}'."
             )
