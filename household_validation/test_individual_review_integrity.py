@@ -138,7 +138,10 @@ class IndividualReviewIntegrityTests(TestCase):
         row_history = HouseholdValidationBatchRow.history.count()
         pwp_columns = {"PWP": DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]}
         with patch.object(HouseholdValidationConfig, "program_specific_export_columns", pwp_columns):
-            self.assertEqual(len(parse_validation_workbook(content).rows), 1)
+            with self.assertRaisesMessage(
+                ValidationError, "Household uploads cannot use an individual validation batch",
+            ):
+                parse_validation_workbook(content)
             for dry_run in (True, False):
                 with self.subTest(dry_run=dry_run), self.assertRaisesMessage(
                     ValidationError, "Household uploads cannot use an individual validation batch",
@@ -155,6 +158,8 @@ class IndividualReviewIntegrityTests(TestCase):
         batch.is_deleted = True
         batch.json_ext.pop("selection_storage")
         batch.save(user=self.actor)
+        with self.assertRaisesMessage(ValidationError, "Household uploads cannot use an individual validation batch"):
+            parse_validation_workbook(self.household_workbook(batch))
         parsed = SimpleNamespace(rows=[SimpleNamespace(values={"batch_id": str(batch.pk)})])
         with self.assertRaisesMessage(ValidationError, "Household uploads cannot use an individual validation batch"):
             HouseholdValidationUploadService(self.actor)._get_or_create_batch(parsed)

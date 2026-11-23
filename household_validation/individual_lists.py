@@ -134,18 +134,17 @@ class IndividualValidationListService:
         return batch
 
     def _read_context(self, batch):
-        visible_ids = self.scoped_individuals(batch).values_list("pk", flat=True)
         current = Individual.objects.filter(pk__in=selected_individual_ids(batch)).aggregate(
             total=Count("pk"), deleted=Count("pk", filter=Q(is_deleted=True)),
         )
-        available = visible_ids.count()
+        available = self._visible_selection_rows(batch).count()
         counts = {
             "available_individuals": available,
             "deleted_individuals": current["deleted"],
             "missing_individuals": batch.json_ext["selected_individuals"] - current["total"],
             "inaccessible_individuals": current["total"] - current["deleted"] - available,
         }
-        return visible_ids, counts
+        return counts
 
     def _visible_selection_rows(self, batch):
         # Each outer row already belongs to the issued selection. Correlate its
@@ -161,7 +160,7 @@ class IndividualValidationListService:
             raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
         batch = self.get_batch(batch_id)
         data = batch.json_ext
-        _, counts = self._read_context(batch)
+        counts = self._read_context(batch)
         rows = self._visible_selection_rows(batch).values_list("raw_row", flat=True)
         page = rows[offset:offset + first]
         return {
@@ -174,7 +173,7 @@ class IndividualValidationListService:
 
     def export(self, batch_id):
         batch = self.get_batch(batch_id)
-        _, counts = self._read_context(batch)
+        counts = self._read_context(batch)
         batch._individual_read_counts = counts
         return batch, IndividualValidationListExporter(
             batch, rows=self._visible_selection_rows(batch).values_list("raw_row", flat=True).iterator(chunk_size=500),

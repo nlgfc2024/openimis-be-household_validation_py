@@ -4,8 +4,8 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from io import BytesIO
 from io import StringIO
-from uuid import UUID
 
+from django.core.exceptions import ValidationError
 from openpyxl import load_workbook
 
 from household_validation.excel import (
@@ -13,6 +13,7 @@ from household_validation.excel import (
     PROJECT_OPTIONS_SHEET,
     PROJECT_OPTIONS_HEADERS,
 )
+from household_validation.household_batches import resolve_household_batch
 from household_validation.identity import get_household_form_number
 from household_validation.wealth import get_household_wealth_quintile
 from household_validation.verification import (
@@ -140,7 +141,12 @@ def _column_registry(benefit_plan_code=None):
     from household_validation.programmes import INDIVIDUAL, programme_rules, resolve_programme_columns
 
     if benefit_plan_code is not None:
-        return {col["key"]: col for col in resolve_programme_columns(benefit_plan_code)}
+        columns = resolve_programme_columns(benefit_plan_code) if benefit_plan_code else []
+        if not columns:
+            raise ValidationError(
+                f"No household upload column configuration for issued benefit plan code '{benefit_plan_code}'."
+            )
+        return {col["key"]: col for col in columns}
     programs = getattr(HouseholdValidationConfig, "program_specific_export_columns", None) or {}
     rules = programme_rules(HouseholdValidationConfig.program_eligibility_rules or {})
     registry = {}
@@ -152,26 +158,6 @@ def _column_registry(benefit_plan_code=None):
             registry[col["key"]] = _merge_columns(existing, col) if existing else col
     overridden = apply_column_option_overrides(list(registry.values()))
     return {col["key"]: col for col in overridden}
-
-
-def _issued_household_programme(worksheet, batch_column):
-    """Resolve an issued household programme; unissued legacy files keep their union rules."""
-    from household_validation.models import HouseholdValidationBatch
-    from household_validation.programmes import INDIVIDUAL
-
-    ids = {_clean(worksheet.cell(row=number, column=batch_column).value)
-           for number in range(2, worksheet.max_row + 1)} - {None}
-    if len(ids) != 1:
-        return None
-    try:
-        batch_id = UUID(ids.pop())
-    except (TypeError, ValueError):
-        return None
-    batch = HouseholdValidationBatch.objects.filter(pk=batch_id).first()
-    if not batch or not batch.generated_at or (batch.json_ext or {}).get("subject") == INDIVIDUAL:
-        return None
-    metadata = batch.json_ext or {}
-    return (metadata.get("benefit_plan_code") or "") if "benefit_plan_code" in metadata else None
 
 
 def parse_validation_workbook(file_or_bytes):
@@ -193,9 +179,13 @@ def parse_validation_workbook(file_or_bytes):
             errors=[f"Missing required columns: {', '.join(missing_columns)}"]
         )
 
-    programme = _issued_household_programme(worksheet, headers["batch_id"])
-    if programme is not None:
-        column_registry = _column_registry(programme)
+    _, batch = resolve_household_batch(
+        worksheet.cell(row=number, column=headers["batch_id"]).value
+        for number in range(2, worksheet.max_row + 1)
+    )
+    metadata = (batch.json_ext or {}) if batch and batch.generated_at else {}
+    if "benefit_plan_code" in metadata:
+        column_registry = _column_registry(metadata["benefit_plan_code"] or "")
         extra_columns = {col["key"]: col["column_name"] for col in column_registry.values()}
         try:
             headers = _read_headers(worksheet, extra_columns)

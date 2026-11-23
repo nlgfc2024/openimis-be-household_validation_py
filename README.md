@@ -27,7 +27,6 @@ The module enables:
 - [Configuration](#configuration)
 - [UMEP Individual Validation](#umep-individual-validation)
 - [UMEP configuration and rollout](docs/umep-individual-validation-rollout.md)
-- [UMEP integrated verification evidence](docs/umep-individual-validation-verification.md)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -426,7 +425,8 @@ Primary Worker/status rules are unchanged.
 
 Household uploads exclude individual programme columns from their registry. A
 known generated household batch selects columns from its stored programme code;
-required fields remain enforced even if their header is removed. Older household
+required fields remain enforced even if their header is removed. Upload fails
+with a configuration error if that programme no longer has configured columns. Older household
 files without issued programme metadata retain the existing permissive merge of
 household definitions. Individual workbooks continue to use their saved column
 snapshots. This prevents enabling UMEP from adding unrelated required fields to

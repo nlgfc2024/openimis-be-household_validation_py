@@ -15,7 +15,7 @@ from household_validation import tests as household_fixtures
 from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig
 from household_validation.individual_lists import IndividualValidationListService
 from household_validation.individual_selection import EligibleIndividualSelectionService
-from household_validation.models import HouseholdValidationBatch
+from household_validation.models import HouseholdValidationBatch, HouseholdValidationBatchRow
 from household_validation.schema import Mutation, Query
 from household_validation.upload import VALIDATION_LIST_SHEET, parse_validation_workbook
 
@@ -67,7 +67,7 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
         self.assertIsNone(result.errors, result.errors)
         return result.data
 
-    def round_trip(self, code):
+    def generate_workbook(self, code):
         self.person.json_ext["data_source"] = "sctp" if code == "UPG" else "pwp"
         self.person.save(user=self.actor)
         generated = self.gql('''mutation($code: String!, $village: String!) {
@@ -79,6 +79,11 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
         workbook = self.workbook(base64.b64decode(generated["fileBase64"]))
         sheet = workbook[VALIDATION_LIST_SHEET]
         headers = {cell.value: cell.column for cell in sheet[1]}
+        return generated, workbook, headers
+
+    def round_trip(self, code):
+        generated, workbook, headers = self.generate_workbook(code)
+        sheet = workbook[VALIDATION_LIST_SHEET]
         self.assertIn("primary_worker", headers)
         self.assertNotIn("decision", headers)
         if code != "PWP":
@@ -171,3 +176,56 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
         parsed = parse_validation_workbook(self.serialise(workbook))
         self.assertIn("Row 2: UPG answer is required", parsed.errors)
         self.assertEqual(parsed.rows, [])
+
+    def test_issued_household_workbook_rejects_missing_programme_config_without_writes(self):
+        query = """mutation($file: String!, $dry: Boolean!) {
+          uploadHouseholdValidationList(fileBase64: $file, dryRun: $dry) { errors }
+        }"""
+        for code in ("PWP", "UPG", "RMEP"):
+            generated, workbook, headers = self.generate_workbook(code)
+            sheet = workbook[VALIDATION_LIST_SHEET]
+            sheet.cell(2, headers["primary_worker"], "Yes")
+            if code != "PWP":
+                sheet.cell(2, headers[f"{code} answer"], "Yes")
+            content = self.serialise(workbook)
+            self.assertEqual(parse_validation_workbook(content).errors, [])
+            encoded = base64.b64encode(content).decode("ascii")
+            before = {
+                "batches": list(HouseholdValidationBatch.objects.values()),
+                "rows": list(HouseholdValidationBatchRow.objects.values()),
+                "people": list(Individual.objects.values()),
+                "groups": list(Group.objects.values()),
+                "memberships": list(GroupIndividual.objects.values()),
+                "history": (HouseholdValidationBatch.history.count(), HouseholdValidationBatchRow.history.count(),
+                            Individual.history.count(), Group.history.count(), GroupIndividual.history.count()),
+            }
+            for drift in ("removed", "renamed", "empty"):
+                columns = deepcopy(HouseholdValidationConfig.program_specific_export_columns)
+                old = columns.pop(code)
+                if drift == "renamed":
+                    columns[f"{code}_RENAMED"] = old
+                elif drift == "empty":
+                    columns[code] = []
+                with patch.object(HouseholdValidationConfig, "program_specific_export_columns", columns):
+                    for dry_run in (True, False):
+                        with self.subTest(code=code, drift=drift, dry_run=dry_run):
+                            result = self.schema.execute(
+                                query, variable_values={"file": encoded, "dry": dry_run},
+                                context_value=SimpleNamespace(user=self.actor),
+                            )
+                            self.assertTrue(result.errors)
+                            self.assertIn(
+                                f"No household upload column configuration for issued benefit plan code '{code}'",
+                                str(result.errors[0]),
+                            )
+                            self.assertIsNone(result.data["uploadHouseholdValidationList"])
+            self.assertEqual(list(HouseholdValidationBatch.objects.values()), before["batches"])
+            self.assertEqual(list(HouseholdValidationBatchRow.objects.values()), before["rows"])
+            self.assertEqual(list(Individual.objects.values()), before["people"])
+            self.assertEqual(list(Group.objects.values()), before["groups"])
+            self.assertEqual(list(GroupIndividual.objects.values()), before["memberships"])
+            self.assertEqual(
+                (HouseholdValidationBatch.history.count(), HouseholdValidationBatchRow.history.count(),
+                 Individual.history.count(), Group.history.count(), GroupIndividual.history.count()),
+                before["history"],
+            )

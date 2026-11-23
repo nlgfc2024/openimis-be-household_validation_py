@@ -144,7 +144,7 @@ submitted values stay hidden. Household history excludes individual batches.
 
 1. Deploy the merged validation backend, enrolment support and the full/partial
    beneficiary-update preservation implementation together. Check the installed
-   module revisions against the [verification record](umep-individual-validation-verification.md).
+   module revisions against the release assembly and its recorded test evidence.
 2. Merge and deploy the contributed frontend implementation and matching UMEP
    language pack before enabling operator access. Confirm the existing upload
    actions still work. Frontend branch tests are not a live browser sign-off.
@@ -153,8 +153,10 @@ submitted values stay hidden. Household history excludes individual batches.
    configuration-file acceptance command below in the test assembly.
 4. Apply the reviewed configuration, restart backend workers, refresh frontend
    configuration, and grant the intended backend rights through normal roles.
-5. Run the pilot checks below using the deployed UI and record evidence. Stop
-   enabling additional operators if decisions, counts, permissions, geography,
+5. Run the deployed UI pilot checks and record instance, operator, role, date,
+   module/config revisions and evidence in the
+   [pilot acceptance record on issue #39](https://github.com/nlgfc2024/openimis-be-household_validation_py/issues/39#issuecomment-7094731483).
+   Stop enabling additional operators if decisions, counts, permissions, geography,
    history or preservation differ from the expected result.
 6. To stop new individual generation, remove the individual programme entry or
    operator access and reload configuration. Preserve issued batches and audit
@@ -176,22 +178,6 @@ python manage.py test social_protection.tests.test_beneficiary_update_validation
 The acceptance suite uses synthetic records and real SQL update procedures. Both
 optional file paths must be supplied together. All acceptance cases must execute;
 a skip for missing enrolment/PostgreSQL is not rollout evidence.
-
-### Pilot acceptance record
-
-Automated results are in the verification record. Fill this table with deployed
-instance, operator, date, role, module/config revisions and evidence references.
-No live pilot sign-off is asserted by repository tests.
-
-| Pilot check | Expected result | Evidence/sign-off |
-| --- | --- | --- |
-| Generate two eligible people; decide one, leave one blank | Counts/preview/export agree; only the decided person changes. | Pending live pilot |
-| Enrolment preview | Only eligible VERIFIED people appear; profile threshold/capacity still apply. | Pending live pilot |
-| Ordinary full and partial beneficiary updates | Decision, source and unrelated individual fields survive; unaccepted business corrections are not applied. | Pending live pilot |
-| Geography and access | Full City/Constituency/Ward/Neighbourhood picker chain; inaccessible/deleted people omitted or reported correctly. | Pending live pilot |
-| Errors, corrections and retries | Dry run writes nothing; partial results, attempt history and CSV match the selected attempt. | Pending live pilot |
-| Roles and editable contexts | Validate respects 958xxx rights; normal Upload/Upload History remain usable. | Pending live pilot |
-| PWP/UPG/RMEP smoke test | Existing generation, columns, primary workers, upload and history remain correct. | Pending live pilot |
 
 Before enabling the pilot, the programme owner must sign off the deployment's
 column wording, requiredness, options/ranges/dependencies, Phase profile and
