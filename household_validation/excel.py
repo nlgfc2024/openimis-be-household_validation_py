@@ -617,16 +617,12 @@ class ExcelValidationListExporter:
                     error=f"Select a valid option for {col['column_name']}.",
                 )
                 return
-            else:
-                formula1 = options_range
+            formula1 = options_range
             validation = DataValidation(
                 type="list",
                 formula1=formula1,
                 allow_blank=not required,
                 showDropDown=False,
-                showInputMessage=dep_met is not None,
-                promptTitle=prompt_title,
-                prompt=prompt,
                 showErrorMessage=True,
                 errorStyle="stop",
                 errorTitle=f"{col['column_name']} not applicable",
