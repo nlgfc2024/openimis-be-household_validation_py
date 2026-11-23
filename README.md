@@ -326,9 +326,16 @@ priority_flag
 require_primary_worker_national_id
 ```
 
-`require_primary_worker_national_id` is `false` unless explicitly enabled for
-the programme. When enabled, a selected primary worker must have a national ID
-either in the uploaded workbook or already on their Individual record.
+PWP enables `require_primary_worker_national_id` by default. A selected primary
+worker must therefore have a national ID either in the uploaded workbook or
+already on their Individual record. Other programmes keep the previous behavior
+unless the rule is explicitly set to `true`.
+
+An instance-level `program_eligibility_rules.PWP` setting replaces the complete
+PWP default rule; it is not merged field by field. Deployments with a saved PWP
+rule must explicitly include `"require_primary_worker_national_id": true` to
+retain this requirement. Set it to `false` (or omit it for non-PWP programmes)
+only when the previous behavior is intended.
 
 #### Selection Strategy
 
