@@ -163,7 +163,7 @@ class HouseholdValidationConfigTest(TestCase):
                 col["key"]
                 for col in DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]
             ],
-            ["has_business"],
+            ["has_business", "business_type", "business_duration"],
         )
 
     def test_retired_business_columns_enabled_warns_on_load(self):
@@ -312,7 +312,7 @@ class ColumnOptionOverridesTest(TestCase):
         custom_choice = next(col for col in service._export_columns if col["key"] == "custom_choice")
         self.assertEqual(custom_choice["options"], ["Option A", "Option B"])
 
-    def test_removed_business_columns_are_not_exported_from_saved_configuration(self):
+    def test_saved_business_columns_are_exported_from_saved_configuration(self):
         service = EligibleHouseholdSelectionService()
         with patch.object(
             HouseholdValidationConfig,
@@ -321,7 +321,10 @@ class ColumnOptionOverridesTest(TestCase):
         ):
             columns = service._resolve_export_columns("PWP")
 
-        self.assertEqual([column["key"] for column in columns], ["has_business"])
+        self.assertEqual(
+            [column["key"] for column in columns],
+            ["has_business", "business_type", "business_duration"],
+        )
 
     def test_upload_validates_against_the_override_not_the_original_default(self):
         workbook = ValidationUploadParserTest()._upload_workbook()
@@ -2912,13 +2915,30 @@ class UploadHardeningTest(TestCase):
         )
         self.assertEqual(validated.invalid_group_keys, frozenset({"group-1"}))
 
-    def test_unconfigured_programme_does_not_require_primary_worker_national_id(self):
+    def test_unconfigured_programme_fails_configuration_validation(self):
         row = self._uploaded_row(2, "member-1", True)
         parsed = WorkbookParseResult(rows=[row])
         batch = SimpleNamespace(json_ext={"benefit_plan_code": "OTHER"})
         service = HouseholdValidationUploadService()
 
-        self.assertEqual(service._validate_primary_worker_national_ids(parsed, batch), parsed)
+        with self.assertRaises(ValidationError):
+            service._validate_primary_worker_national_ids(parsed, batch)
+
+    def test_missing_programme_code_uses_pwp_national_id_requirement(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        group_individual = SimpleNamespace(individual=SimpleNamespace(json_ext={}))
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, None)
+
+        self.assertEqual(validated.rows, [])
+        self.assertEqual(
+            validated.invalid_rows[0].error_code,
+            PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+        )
 
     def test_primary_worker_preflight_ignores_stored_value_for_blank_cell(self):
         group = self._group_with_primary_workers(True, False)
@@ -3291,6 +3311,44 @@ class UploadHardeningTest(TestCase):
             HouseholdValidationBatchRow.Status.APPLIED,
         )
 
+    def test_apply_row_keeps_stored_national_id_when_upload_cell_is_blank(self):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            individual=SimpleNamespace(id="individual-1", json_ext={"national_id": "OLD-001"}),
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+                "form_number": "FORM-001",
+                "national_id": None,
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_resolve_row", return_value=([], group, group_individual, None)),
+            patch.object(service, "_apply_national_id") as apply_national_id_mock,
+            patch.object(service, "_save_batch_row"),
+        ):
+            _, participant_updated = service._apply_row(
+                uploaded_row,
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+                allow_participant_update=True,
+            )
+
+        self.assertFalse(participant_updated)
+        apply_national_id_mock.assert_not_called()
+
     def test_apply_row_preserves_primary_worker_for_blank_cell(self):
         group = SimpleNamespace(id="group-1")
         group_individual = SimpleNamespace(
@@ -3609,6 +3667,7 @@ class UploadHardeningTest(TestCase):
             patch.object(service, "_apply_row", return_value=([], False)),
             patch.object(service, "_apply_group_validation_if_changed"),
             patch.object(service, "_save_batch_row") as save_batch_row_mock,
+            patch.object(service, "_resolve_row", return_value=([], None, None, None)),
             patch(
                 "household_validation.services.transaction.atomic",
                 return_value=nullcontext(),
@@ -3624,6 +3683,9 @@ class UploadHardeningTest(TestCase):
         save_batch_row_mock.assert_called_once_with(
             batch,
             invalid_row,
+            group=None,
+            group_individual=None,
+            project=None,
             status=HouseholdValidationBatchRow.Status.ERROR,
             error_message=national_id_error,
             error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,

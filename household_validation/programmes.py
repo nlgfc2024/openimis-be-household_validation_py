@@ -63,15 +63,11 @@ def resolve_programme_rule(benefit_plan_code=None):
 def requires_primary_worker_national_id(benefit_plan_code=None):
     """Whether the programme requires an ID for its selected primary worker.
 
-    The requirement is opt-in so legacy and independently configured programmes
-    retain their current upload behaviour.
+    An omitted programme code follows the module's normal PWP fallback.  An
+    explicitly unknown code remains an error so a configuration problem is not
+    silently converted into a less strict upload.
     """
-    if not benefit_plan_code:
-        return False
-    try:
-        rule = resolve_programme_rule(benefit_plan_code)
-    except ValidationError:
-        return False
+    rule = resolve_programme_rule(benefit_plan_code)
     return bool(rule.get("require_primary_worker_national_id", False))
 
 
