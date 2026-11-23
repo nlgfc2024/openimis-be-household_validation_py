@@ -24,6 +24,8 @@ VALIDATION_LIST_SHEET = "Validation List"
 PROJECT_SELECTION_TYPE_INTENT = "INTENT"
 VALIDATION_STATUS_VERIFIED = "VERIFIED"
 VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
+VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
+PRIMARY_WORKER_NATIONAL_ID_REQUIRED = "PRIMARY_WORKER_NATIONAL_ID_REQUIRED"
 
 OPTIONAL_UPLOAD_COLUMNS = {
     PARTICIPANT_STATUS_COLUMN,
@@ -68,8 +70,16 @@ class UploadedValidationRow:
 
 
 @dataclass(frozen=True)
+class InvalidWorkbookRow:
+    uploaded_row: UploadedValidationRow
+    errors: list[str]
+    error_code: str = VALIDATION_ERROR_CODE
+
+
+@dataclass(frozen=True)
 class WorkbookParseResult:
     rows: list[UploadedValidationRow] = field(default_factory=list)
+    invalid_rows: list[InvalidWorkbookRow] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     error_row_numbers: frozenset[int] = field(default_factory=frozenset)
     invalid_group_keys: frozenset[str] = field(default_factory=frozenset)
@@ -154,6 +164,7 @@ def parse_validation_workbook(file_or_bytes):
 
     project_options = _read_project_options(workbook)
     rows = []
+    invalid_rows = []
     error_row_numbers = set()
     invalid_group_keys = set()
     total_rows_read = 0
@@ -194,30 +205,31 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(f"Row {row_number}: validation_date is invalid")
         if project_label and not project_id:
             row_errors.append(f"Row {row_number}: project is not in the project options")
+        uploaded_row = UploadedValidationRow(
+            row_number=row_number,
+            values=values,
+            # Verification is derived for the whole household by the upload
+            # service after projecting all Primary Worker values.
+            verified=None,
+            primary_worker=primary_worker,
+            validation_date=validation_date,
+            project_name=project_name,
+            project_id=project_id,
+            notes=_clean(values.get("validation_notes")),
+            business_updates=business_updates,
+        )
         if row_errors:
             errors.extend(row_errors)
             error_row_numbers.add(row_number)
             group_key = str(values.get("group_uuid") or "").strip()
             if group_key:
                 invalid_group_keys.add(group_key)
+            invalid_rows.append(InvalidWorkbookRow(uploaded_row, row_errors))
             continue
-        rows.append(
-            UploadedValidationRow(
-                row_number=row_number,
-                values=values,
-                # Verification is derived for the whole household by the upload
-                # service after projecting all Primary Worker values.
-                verified=None,
-                primary_worker=primary_worker,
-                validation_date=validation_date,
-                project_name=project_name,
-                project_id=project_id,
-                notes=_clean(values.get("validation_notes")),
-                business_updates=business_updates,
-            )
-        )
+        rows.append(uploaded_row)
     return WorkbookParseResult(
         rows=rows,
+        invalid_rows=invalid_rows,
         errors=errors,
         error_row_numbers=frozenset(error_row_numbers),
         invalid_group_keys=frozenset(invalid_group_keys),

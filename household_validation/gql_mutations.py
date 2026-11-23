@@ -161,6 +161,7 @@ class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     households_with_multiple_primary_workers = graphene.Int()
     errors = graphene.Int()
     error_messages = graphene.List(graphene.String)
+    error_codes = graphene.List(graphene.String)
 
 
 class GenerateHouseholdValidationListMutation(graphene.Mutation):
@@ -278,6 +279,9 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             batch_id=batch.id,
             projects=projects,
             additional_columns=service.export_columns or [],
+            require_primary_worker_national_id=bool(
+                resolved_rule.get("require_primary_worker_national_id")
+            ),
         ).export_bytes()
         file_name = f"household_validation_{batch.id}.xlsx"
         return HouseholdValidationGenerateResultGQLType(

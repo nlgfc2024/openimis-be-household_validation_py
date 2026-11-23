@@ -14,7 +14,10 @@ from individual.services import GroupIndividualService, IndividualService
 from project_social_protection.models import Project
 
 from household_validation.geography import ValidationGeographyMixin
-from household_validation.programmes import HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns
+from household_validation.programmes import (
+    HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns,
+    requires_primary_worker_national_id,
+)
 from household_validation.excel import (
     LOCATION_COLUMN_TYPES,
     is_primary_worker_rejection,
@@ -34,6 +37,9 @@ from household_validation.selection import (
     select_households,
 )
 from household_validation.upload import (
+    PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+    InvalidWorkbookRow,
+    WorkbookParseResult,
     build_validation_error_report_csv,
     build_validation_json_ext,
     member_structural_errors,
@@ -73,6 +79,12 @@ class HouseholdValidationUploadService:
         self._member_details_changed_group_ids = set()
         self._upload_attempt_id = None
         parsed = parse_validation_workbook(file_or_bytes)
+        batch = (
+            self._existing_household_batch(self._batch_id(parsed))
+            if dry_run
+            else self._get_or_create_batch(parsed, source_file_name=source_file_name)
+        )
+        parsed = self._validate_primary_worker_national_ids(parsed, batch)
         totals = {
             "rows_read": parsed.rows_read,
             "households_verified": 0,
@@ -85,6 +97,10 @@ class HouseholdValidationUploadService:
             "households_with_multiple_primary_workers": 0,
             "errors": len(parsed.errors),
             "error_messages": list(parsed.errors),
+            "error_codes": sorted({
+                invalid_row.error_code
+                for invalid_row in getattr(parsed, "invalid_rows", [])
+            }),
         }
         participant_update_group_keys = (
             self._accepted_validation_group_keys(parsed.rows)
@@ -94,6 +110,11 @@ class HouseholdValidationUploadService:
             parsed.rows,
             eligible_group_keys=participant_update_group_keys,
         )
+        if primary_worker_rejections:
+            totals["error_codes"] = sorted({
+                *totals["error_codes"],
+                "MULTIPLE_PRIMARY_WORKERS",
+            })
         totals["households_with_multiple_primary_workers"] = len(
             primary_worker_rejections
         )
@@ -118,6 +139,16 @@ class HouseholdValidationUploadService:
         totals["households_rejected"] = sum(
             status == REJECTED for status in decisions.values()
         )
+        business_rejection_group_keys = {
+            group_key
+            for group_key, status in decisions.items()
+            if status == REJECTED and group_key not in primary_worker_rejections
+        }
+        if business_rejection_group_keys:
+            totals["error_codes"] = sorted({
+                *totals["error_codes"],
+                BUSINESS_REJECTION_CODE,
+            })
         verification_statuses = self._primary_worker_verification_statuses(
             parsed.rows,
             eligible_group_keys=participant_update_group_keys,
@@ -151,7 +182,6 @@ class HouseholdValidationUploadService:
             and self._uploaded_group_key(row) not in primary_worker_rejections
         })
         if dry_run:
-            self._existing_household_batch(self._batch_id(parsed))
             totals["households_verified"] = sum(status == VERIFIED for status in decisions.values())
             totals["households_not_verified"] = sum(status == NOT_VERIFIED for status in decisions.values())
             for status, key in ((VERIFIED, "participants_verified"), (NOT_VERIFIED, "participants_not_verified")):
@@ -163,10 +193,6 @@ class HouseholdValidationUploadService:
             return totals
 
         self._upload_attempt_id = uuid4()
-        batch = self._get_or_create_batch(
-            parsed,
-            source_file_name=source_file_name,
-        )
         totals["batch_id"] = batch.id
         totals["upload_attempt_id"] = self._upload_attempt_id
         uploaded_at = timezone.now()
@@ -180,6 +206,20 @@ class HouseholdValidationUploadService:
         successful_rows_by_group = {}
 
         with transaction.atomic():
+            for invalid_row in getattr(parsed, "invalid_rows", []):
+                _, group, group_individual, project = self._resolve_row(
+                    invalid_row.uploaded_row
+                )
+                self._save_batch_row(
+                    batch,
+                    invalid_row.uploaded_row,
+                    group=group,
+                    group_individual=group_individual,
+                    project=project,
+                    status=HouseholdValidationBatchRow.Status.ERROR,
+                    error_message="; ".join(invalid_row.errors),
+                    error_code=invalid_row.error_code,
+                )
             for group_key, verified in verification_statuses.items():
                 if verified is True and self._replace_primary_worker(
                     uploaded_rows_by_group[group_key]
@@ -273,6 +313,76 @@ class HouseholdValidationUploadService:
             for group_key, is_valid in group_is_valid.items()
             if is_valid
         }
+
+    def _validate_primary_worker_national_ids(self, parsed, batch):
+        """Apply the programme rule after resolving the uploaded batch.
+
+        The parser deliberately stays database-free. Here we can determine the
+        programme from the generated batch and accept an ID already stored on
+        the selected member when the workbook cell is blank.
+        """
+        # Upload parsing always returns WorkbookParseResult.  Keeping this
+        # guard also allows callers that supply a lightweight parser result
+        # for reporting-only workflows to retain their established contract.
+        if not isinstance(parsed, WorkbookParseResult):
+            return parsed
+
+        benefit_plan_code = (
+            (getattr(batch, "json_ext", None) or {}).get("benefit_plan_code")
+        )
+        if not requires_primary_worker_national_id(benefit_plan_code):
+            return parsed
+
+        rows = []
+        invalid_rows = list(parsed.invalid_rows)
+        errors = list(parsed.errors)
+        error_row_numbers = set(parsed.error_row_numbers)
+        invalid_group_keys = set(parsed.invalid_group_keys)
+
+        for uploaded_row in parsed.rows:
+            if uploaded_row.primary_worker is not True:
+                rows.append(uploaded_row)
+                continue
+            resolution_errors, _, group_individual, _ = self._resolve_row(uploaded_row)
+            # Preserve the more useful structural error (for example, an
+            # unknown member) instead of masking it with a missing-ID error.
+            if resolution_errors:
+                rows.append(uploaded_row)
+                continue
+            individual = getattr(group_individual, "individual", None)
+            stored_national_id = self._normalize_national_id(
+                (getattr(individual, "json_ext", None) or {}).get("national_id")
+            )
+            uploaded_national_id = self._normalize_national_id(
+                uploaded_row.values.get("national_id")
+            )
+            if uploaded_national_id or stored_national_id:
+                rows.append(uploaded_row)
+                continue
+
+            error = (
+                f"Row {uploaded_row.row_number}: national_id is required "
+                "for the selected primary worker"
+            )
+            errors.append(error)
+            error_row_numbers.add(uploaded_row.row_number)
+            group_key = self._uploaded_group_key(uploaded_row)
+            if group_key:
+                invalid_group_keys.add(group_key)
+            invalid_rows.append(InvalidWorkbookRow(
+                uploaded_row,
+                [error],
+                error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+            ))
+
+        return replace(
+            parsed,
+            rows=rows,
+            invalid_rows=invalid_rows,
+            errors=errors,
+            error_row_numbers=frozenset(error_row_numbers),
+            invalid_group_keys=frozenset(invalid_group_keys),
+        )
 
     def _primary_worker_verification_statuses(
         self,
@@ -472,7 +582,13 @@ class HouseholdValidationUploadService:
     def _batch_id(self, parsed):
         batch_ids = {
             row.values.get("batch_id")
-            for row in parsed.rows
+            for row in [
+                *parsed.rows,
+                *[
+                    invalid_row.uploaded_row
+                    for invalid_row in getattr(parsed, "invalid_rows", [])
+                ],
+            ]
             if row.values.get("batch_id")
         }
         if len(batch_ids) != 1:
@@ -534,6 +650,7 @@ class HouseholdValidationUploadService:
         national_id_updated = (
             allow_participant_update
             and "national_id" in uploaded_row.values
+            and self._normalize_national_id(uploaded_row.values.get("national_id")) is not None
             and self._national_id_changed(
                 group_individual,
                 uploaded_row.values.get("national_id"),

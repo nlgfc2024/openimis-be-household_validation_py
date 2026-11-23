@@ -24,6 +24,13 @@ def programme_rules(rules):
             raise ValidationError(f"Duplicate validation programme code: {code}")
         if not isinstance(rule, dict):
             raise ValidationError(f"Validation rule for {code} must be an object.")
+        if (
+            "require_primary_worker_national_id" in rule
+            and not isinstance(rule["require_primary_worker_national_id"], bool)
+        ):
+            raise ValidationError(
+                f"require_primary_worker_national_id for {code} must be a boolean."
+            )
         subject = rule.get("subject", HOUSEHOLD)
         if subject not in (HOUSEHOLD, INDIVIDUAL):
             raise ValidationError(f"Unsupported validation subject for {code}: {subject}")
@@ -51,6 +58,17 @@ def resolve_programme_rule(benefit_plan_code=None):
     if code not in rules:
         raise ValidationError(f"No eligibility rule configured for benefit plan code '{benefit_plan_code}'")
     return deepcopy(rules[code])
+
+
+def requires_primary_worker_national_id(benefit_plan_code=None):
+    """Whether the programme requires an ID for its selected primary worker.
+
+    An omitted programme code follows the module's normal PWP fallback.  An
+    explicitly unknown code remains an error so a configuration problem is not
+    silently converted into a less strict upload.
+    """
+    rule = resolve_programme_rule(benefit_plan_code)
+    return bool(rule.get("require_primary_worker_national_id", False))
 
 
 def resolve_programme_subject(benefit_plan_code=None):

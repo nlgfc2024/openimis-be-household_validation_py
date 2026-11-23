@@ -21,7 +21,7 @@ RETIRED_CONFIG_KEYS = (
     "business_type_options",
 )
 
-# A generic, minimal "Type of Business" defaults
+# A generic, minimal "Type of Business" defaults.
 DEFAULT_BUSINESS_TYPE_OPTIONS = [
     "Crop farming",
     "Livestock farming",
@@ -121,6 +121,9 @@ DEFAULT_CONFIG = {
     "program_eligibility_rules": {
         "PWP": {
             "member_flag": "fit_for_work",
+            # Opt in explicitly. Other programmes remain unchanged unless
+            # their own rule enables this requirement.
+            "require_primary_worker_national_id": True,
             "selection_strategy": {
                 "female_headed_percentage": 40,
                 "youth_headed_percentage": 40,
@@ -181,17 +184,16 @@ DEFAULT_CONFIG = {
         ],
     },
     # Deployment override for just a column's `options` list, keyed by the
-    # column's `key` (e.g. "business_type") -- not by program. Applies
+    # column's `key` -- not by program. Applies
     # wherever that key appears, across every program's column list, in both
     # export (ExcelValidationListExporter) and upload
     # (upload.py::_column_registry) so the two stay consistent.
     #
-    # Exists so a deployment that's otherwise happy with the built-in PWP
-    # defaults (the common case) can swap in its own business types --
-    # or any other select column's options -- without having to redeclare
+    # Exists so a deployment can swap a select column's options without
+    # having to redeclare
     # program_specific_export_columns (or program_eligibility_rules) at all:
     #
-    #   {"export_column_options_overrides": {"business_type": ["Rice farming", "Retail shop", "..."]}}
+    #   {"export_column_options_overrides": {"custom_choice": ["Option A", "Option B"]}}
     #
     # is a complete, valid ModuleConfiguration override on its own. Applied
     # via apps.py::apply_column_option_overrides.
