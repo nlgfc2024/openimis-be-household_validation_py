@@ -4410,7 +4410,8 @@ class BusinessVerificationRulesTest(LegacyBusinessColumnsTestMixin, TestCase):
                 with (
                     patch.object(service, "_group", return_value=group),
                     patch.object(service, "_structural_errors", return_value=[]),
-                    patch.object(service, "_get_or_create_batch", return_value=MagicMock()) as batch,
+                    patch.object(service, "_get_or_create_batch",
+                                 return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})) as batch,
                     patch.object(service, "_replace_primary_worker", return_value=False) as replace_worker,
                     patch.object(service, "_save_batch_row") as audit,
                     patch("household_validation.services.IndividualService") as individual_service,
@@ -4509,7 +4510,8 @@ class PwpVerificationRulesTest(TestCase):
                 with (
                     patch.object(service, "_group", return_value=group),
                     patch.object(service, "_structural_errors", return_value=[]),
-                    patch.object(service, "_get_or_create_batch", return_value=MagicMock()) as batch,
+                    patch.object(service, "_get_or_create_batch",
+                                 return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})) as batch,
                     patch.object(service, "_replace_primary_worker", return_value=False) as replace_worker,
                     patch.object(service, "_save_batch_row"),
                     patch("household_validation.services.IndividualService") as individual_service,
@@ -4559,7 +4561,8 @@ class PwpVerificationRulesTest(TestCase):
         with (
             patch.object(service, "_group", return_value=group),
             patch.object(service, "_structural_errors", return_value=[]),
-            patch.object(service, "_get_or_create_batch", return_value=MagicMock()),
+            patch.object(service, "_get_or_create_batch",
+                         return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})),
             patch.object(service, "_save_primary_worker_rejection"),
             patch.object(service, "_apply_row") as apply_row,
             patch.object(service, "_replace_primary_worker") as replace_worker,

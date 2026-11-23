@@ -54,7 +54,8 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
         self.group.save(user=self.actor)
         self.person = Individual(
             first_name="Synthetic", last_name="Household head", dob=date(1995, 1, 1), location=self.village,
-            json_ext={"gender": "Male", "fit_for_work": True, "unrelated": "keep"},
+            json_ext={"gender": "Male", "fit_for_work": True, "unrelated": "keep",
+                      "national_id": "NAT-COEX-001"},
         )
         self.person.save(user=self.actor)
         self.membership = GroupIndividual(group=self.group, individual=self.person, role="HEAD")
@@ -154,6 +155,51 @@ class HouseholdProgrammeCoexistenceTests(TestCase):
 
     def test_pwp_round_trip_with_empty_benefit_plan_code_with_individual_programme_enabled(self):
         self.round_trip("")
+
+    def test_pwp_batch_resolution_preserves_primary_worker_national_id_requirement(self):
+        self.person.json_ext.pop("national_id")
+        self.person.save(user=self.actor)
+        query = '''mutation($file: String!, $dry: Boolean!) {
+          uploadHouseholdValidationList(fileBase64: $file, dryRun: $dry) {
+            batchId errors errorMessages householdsVerified
+          }
+        }'''
+        for code in (None, "", "PWP"):
+            generated, workbook, headers = self.generate_workbook(code)
+            workbook[VALIDATION_LIST_SHEET].cell(2, headers["primary_worker"], "Yes")
+            encoded = base64.b64encode(self.serialise(workbook)).decode("ascii")
+            batch_count = HouseholdValidationBatch.objects.count()
+            for dry_run in (True, False):
+                with self.subTest(code=code, dry_run=dry_run):
+                    result = self.gql(query, {"file": encoded, "dry": dry_run})["uploadHouseholdValidationList"]
+                    self.assertEqual(result["errors"], 1)
+                    self.assertIn("national_id is required", result["errorMessages"][0])
+                    self.assertEqual(result["householdsVerified"], 0)
+                    if not dry_run:
+                        self.assertEqual(result["batchId"], generated["batchId"])
+                    self.assertEqual(HouseholdValidationBatch.objects.count(), batch_count)
+            self.person.refresh_from_db()
+            self.group.refresh_from_db()
+            self.membership.refresh_from_db()
+            self.assertNotIn("validation_status", self.person.json_ext)
+            self.assertNotIn("validation_status", self.group.json_ext)
+            self.assertFalse((self.membership.json_ext or {}).get("primary_worker", False))
+
+    def test_invalid_programme_answers_retain_the_issued_batch(self):
+        generated, workbook, headers = self.generate_workbook("UPG")
+        workbook[VALIDATION_LIST_SHEET].cell(2, headers["primary_worker"], "Yes")
+        content = self.serialise(workbook)
+        parsed = parse_validation_workbook(content)
+        self.assertEqual(parsed.rows, [])
+        self.assertEqual(len(parsed.invalid_rows), 1)
+        query = '''mutation($file: String!) {
+          uploadHouseholdValidationList(fileBase64: $file) { batchId errors }
+        }'''
+        batch_count = HouseholdValidationBatch.objects.count()
+        result = self.gql(query, {"file": base64.b64encode(content).decode("ascii")})["uploadHouseholdValidationList"]
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(result["batchId"], generated["batchId"])
+        self.assertEqual(HouseholdValidationBatch.objects.count(), batch_count)
 
     def test_upg_round_trip_with_individual_programme_enabled(self):
         self.round_trip("UPG")

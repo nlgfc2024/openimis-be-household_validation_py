@@ -577,6 +577,7 @@ class HouseholdValidationUploadService:
                 ],
             ]
         )
+
     def _resolve_row(self, uploaded_row):
         errors = []
         group = self._group(uploaded_row.values["group_uuid"])
