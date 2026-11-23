@@ -2,6 +2,79 @@ import graphene
 from graphene.types.generic import GenericScalar
 
 
+class ValidationProgrammeGQLType(graphene.ObjectType):
+    benefit_plan_code = graphene.String(required=True)
+    subject = graphene.String(required=True)
+    data_source = graphene.String()
+    columns = GenericScalar()
+    decision_values = graphene.List(graphene.String)
+    blank_decision_behavior = graphene.String()
+
+
+class IndividualValidationCandidateGQLType(graphene.ObjectType):
+    id = graphene.UUID()
+    first_name = graphene.String()
+    last_name = graphene.String()
+    dob = graphene.Date()
+    location_id = graphene.Int()
+
+
+class IndividualValidationCandidatesGQLType(graphene.ObjectType):
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    items = graphene.List(IndividualValidationCandidateGQLType)
+    has_next_page = graphene.Boolean()
+
+
+class IndividualValidationSavedListGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    available_individuals = graphene.Int()
+    deleted_individuals = graphene.Int()
+    missing_individuals = graphene.Int()
+    inaccessible_individuals = graphene.Int()
+    display_fields = GenericScalar()
+    columns = GenericScalar()
+    items = graphene.List(GenericScalar)
+    has_next_page = graphene.Boolean()
+
+
+class IndividualValidationBatchSummaryGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    benefit_plan_code = graphene.String()
+    generated_at = graphene.DateTime()
+    uploaded_at = graphene.DateTime()
+    source_file_name = graphene.String()
+    status = graphene.String()
+    selected_individuals = graphene.Int()
+
+
+class IndividualValidationBatchesGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    has_next_page = graphene.Boolean()
+    items = graphene.List(IndividualValidationBatchSummaryGQLType)
+
+
+class IndividualValidationAttemptsGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    attempts = graphene.List(GenericScalar)
+
+
+class IndividualValidationAttemptRowsGQLType(graphene.ObjectType):
+    count = graphene.Int()
+    items = graphene.List(GenericScalar)
+    has_next_page = graphene.Boolean()
+
+
+class IndividualValidationErrorReportGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    error_count = graphene.Int()
+
+
 class HouseholdValidationProjectGQLType(graphene.ObjectType):
     id = graphene.String()
     name = graphene.String()

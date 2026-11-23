@@ -9,6 +9,20 @@ BUSINESS_REJECTION_CODE = "BUSINESS_WITHOUT_PRIMARY_WORKER"
 YES_VALUES = ("YES", "Y", "TRUE", "1")
 NO_VALUES = ("NO", "N", "FALSE", "0")
 
+# Individual validation is an explicit decision, not a Primary Worker answer.
+INDIVIDUAL_DECISIONS = (VERIFIED, NOT_VERIFIED)
+
+
+def parse_individual_decision(value):
+    """Blank skips all row updates; other values must name an agreed decision."""
+    from django.core.exceptions import ValidationError
+
+    if value is None or (isinstance(value, str) and not value.strip()):
+        return None
+    if isinstance(value, str) and value.strip().upper() in INDIVIDUAL_DECISIONS:
+        return value.strip().upper()
+    raise ValidationError("Individual validation decision must be VERIFIED or NOT_VERIFIED.")
+
 
 def resolve_participant_status(primary_worker):
     """A member is VERIFIED once the Primary Worker cell is answered at all

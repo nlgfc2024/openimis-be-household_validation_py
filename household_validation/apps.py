@@ -1,6 +1,9 @@
 import logging
 
 from django.apps import AppConfig
+from django.core.exceptions import ValidationError
+
+from core.module_config_registry import register_validator
 
 logger = logging.getLogger(__name__)
 
@@ -18,7 +21,7 @@ RETIRED_CONFIG_KEYS = (
     "business_type_options",
 )
 
-# A generic, minimal "Type of Business" defaults
+# A generic, minimal "Type of Business" defaults.
 DEFAULT_BUSINESS_TYPE_OPTIONS = [
     "Crop farming",
     "Livestock farming",
@@ -97,6 +100,10 @@ DEFAULT_CONFIG = {
     "group_update_perms": [str(RIGHT_GROUP_UPDATE)],
     # Program Specific Eligibility + selection-strategy rules.
     #
+    # - subject: HOUSEHOLD when omitted; INDIVIDUAL enables the individual
+    #   candidate service for that programme (see README's UMEP section).
+    # - data_source: optional individual source key; defaults to the same
+    #   legacy UBR source as enrolment when omitted.
     # - selection_strategy: presence/absence picks the algorithm. Omitted
     #   (the default), all eligible households are selected, up to
     #   target_count.
@@ -114,6 +121,9 @@ DEFAULT_CONFIG = {
     "program_eligibility_rules": {
         "PWP": {
             "member_flag": "fit_for_work",
+            # Opt in explicitly. Other programmes remain unchanged unless
+            # their own rule enables this requirement.
+            "require_primary_worker_national_id": True,
             "selection_strategy": {
                 "female_headed_percentage": 40,
                 "youth_headed_percentage": 40,
@@ -138,6 +148,10 @@ DEFAULT_CONFIG = {
     # - depends_on (optional): {key, equals} -- the cell is only
     #   editable/checked when the referenced column's value on that row
     #   equals `equals`.
+    # Protected individual workbook fields, keyed by programme. Each entry has
+    # column_name and exactly one of json_ext_key or location_type (R/D/W/V).
+    # Deployments choose their own identity keys and geography labels.
+    "individual_workbook_fields": {},
     "program_specific_export_columns": {
         "PWP": [
             {
@@ -170,17 +184,16 @@ DEFAULT_CONFIG = {
         ],
     },
     # Deployment override for just a column's `options` list, keyed by the
-    # column's `key` (e.g. "business_type") -- not by program. Applies
+    # column's `key` -- not by program. Applies
     # wherever that key appears, across every program's column list, in both
     # export (ExcelValidationListExporter) and upload
     # (upload.py::_column_registry) so the two stay consistent.
     #
-    # Exists so a deployment that's otherwise happy with the built-in PWP
-    # defaults (the common case) can swap in its own business types --
-    # or any other select column's options -- without having to redeclare
+    # Exists so a deployment can swap a select column's options without
+    # having to redeclare
     # program_specific_export_columns (or program_eligibility_rules) at all:
     #
-    #   {"export_column_options_overrides": {"business_type": ["Rice farming", "Retail shop", "..."]}}
+    #   {"export_column_options_overrides": {"custom_choice": ["Option A", "Option B"]}}
     #
     # is a complete, valid ModuleConfiguration override on its own. Applied
     # via apps.py::apply_column_option_overrides.
@@ -201,6 +214,7 @@ class HouseholdValidationConfig(AppConfig):
     group_update_perms = None
     program_eligibility_rules = None
     program_specific_export_columns = None
+    individual_workbook_fields = None
     export_column_options_overrides = None
 
     @classmethod
@@ -208,6 +222,12 @@ class HouseholdValidationConfig(AppConfig):
         """
         Load config fields that match current AppConfig class fields.
         """
+        from household_validation.programmes import individual_workbook_fields, programme_rules
+
+        if "program_eligibility_rules" in cfg:
+            programme_rules(cfg["program_eligibility_rules"])
+        if "individual_workbook_fields" in cfg:
+            individual_workbook_fields(cfg["individual_workbook_fields"])
         stale_keys = [key for key in RETIRED_CONFIG_KEYS if key in cfg]
         if stale_keys:
             logger.warning(
@@ -225,6 +245,21 @@ class HouseholdValidationConfig(AppConfig):
         from core.models import ModuleConfiguration
         cfg = ModuleConfiguration.get_or_default(self.name, DEFAULT_CONFIG)
         self._load_config(cfg)
+        register_validator(self.name, self._validate_module_config)
+
+    def _validate_module_config(self, instance):
+        """Reject invalid rules on save, before the next application restart."""
+        from household_validation.programmes import individual_workbook_fields, programme_rules
+
+        saved = instance._cfg
+        if not isinstance(saved, dict):
+            raise ValidationError({"config": "Module configuration must be an object."})
+        config = {**DEFAULT_CONFIG, **saved}
+        try:
+            programme_rules(config["program_eligibility_rules"])
+            individual_workbook_fields(config["individual_workbook_fields"])
+        except ValidationError as exc:
+            raise ValidationError({"config": exc.messages}) from exc
 
 
 def apply_column_option_overrides(columns):

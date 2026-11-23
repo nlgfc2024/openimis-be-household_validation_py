@@ -25,6 +25,7 @@ The module enables:
 - [Selection Logic](#selection-logic)
 - [Program-Based Selection](#program-based-selection)
 - [Configuration](#configuration)
+- [UMEP Individual Validation](#umep-individual-validation)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -282,7 +283,9 @@ export_column_options_overrides
 
 These values are stored in the module's `ModuleConfiguration`.
 
-The configuration is backend-only and is not exposed through GraphQL.
+The configuration remains backend-owned. The permission-checked
+`validationProgrammes` query exposes programme codes, resolved subjects,
+effective export columns and the individual decision contract to the frontend.
 
 ---
 
@@ -300,6 +303,7 @@ Defines:
 "program_eligibility_rules": {
     "PWP": {
         "member_flag": "fit_for_work",
+        "require_primary_worker_national_id": True,
         "selection_strategy": {
             "female_headed_percentage": 40,
             "youth_headed_percentage": 40,
@@ -319,7 +323,19 @@ member_flag
 member_min_age
 member_max_age
 priority_flag
+require_primary_worker_national_id
 ```
+
+PWP enables `require_primary_worker_national_id` by default. A selected primary
+worker must therefore have a national ID either in the uploaded workbook or
+already on their Individual record. Other programmes keep the previous behavior
+unless the rule is explicitly set to `true`.
+
+An instance-level `program_eligibility_rules.PWP` setting replaces the complete
+PWP default rule; it is not merged field by field. Deployments with a saved PWP
+rule must explicitly include `"require_primary_worker_national_id": true` to
+retain this requirement. Set it to `false` (or omit it for non-PWP programmes)
+only when the previous behavior is intended.
 
 #### Selection Strategy
 
@@ -363,6 +379,339 @@ business_type_options
 ```
 
 The module logs warnings when retired configuration keys are detected.
+
+---
+
+## UMEP Individual Validation
+
+Add `"UMEP": {"subject": "INDIVIDUAL", "data_source": "ubr"}` to the
+existing `program_eligibility_rules`. Omitted subjects remain `HOUSEHOLD`; other
+subject values are rejected. Individual rules accept `subject` and an optional
+non-empty `data_source` only. Set the source to the UMEP Phase's
+`json_ext.data_source`; when omitted, both validation and enrolment default to
+`ubr`, including legacy missing, null and empty source tags. Surrounding whitespace
+in a configured individual source is stripped when read; case is preserved and
+other source keys match exactly. Candidates are accessible, non-deleted individuals
+outside active households, filtered through `Individual.location` and ordered by primary key.
+Targets count people.
+
+The source-rule names deliberately retain different matching contracts:
+household `requires_data_source` is an optional member eligibility requirement,
+with case-insensitive matching and no implicit source default. Individual
+`data_source` scopes candidates through enrolment's `data_source_q` semantics,
+including the UBR default and legacy-tag handling above. Keeping both contracts
+preserves existing household deployments while aligning individual validation
+with the UMEP enrolment population.
+
+Deployment configuration is maintained in
+[nlgfc2024/coremis-configs](https://github.com/nlgfc2024/coremis-configs/blob/main/household_validation/umep.household_validation.config.json).
+Its per-instance file contains the complete UMEP rules, programme-specific columns
+and option overrides. Saved top-level blocks **replace** defaults, without deep
+merge. Use the instance file as a whole; retain other programme entries explicitly
+if configuring a shared deployment. The default module configuration remains
+household-only. Configuration rules are validated on save through the core module
+configuration registry and again at startup.
+
+The individual decision contract is **VERIFIED / NOT_VERIFIED only**. Leading and
+trailing whitespace is trimmed and case normalised. Blank/null decisions skip the
+whole row without changes; unsupported values, including REJECTED and Yes/No, are
+invalid. VERIFIED decisions must satisfy applicable configured required fields.
+NOT_VERIFIED decisions allow blank business answers (for example, when a business
+does not exist or a person cannot be reached); omitted answers preserve stored
+values, subject to the configured dependency rules. Supplied answers for either
+decision must satisfy dependencies, types, options and numeric bounds. Household
+Primary Worker/status rules are unchanged.
+
+The read-only queries below reuse right `958001`. They expose programme metadata
+and current candidates; candidate results are not a saved workbook list.
+
+```graphql
+query {
+  validationProgrammes {
+    benefitPlanCode subject dataSource columns decisionValues blankDecisionBehavior
+  }
+  individualValidationCandidates(
+    benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
+    excludeValidated: true, targetCount: 100, first: 20, offset: 0
+  ) {
+    eligibleIndividuals selectedIndividuals hasNextPage
+    items { id firstName lastName dob locationId }
+  }
+}
+```
+
+`benefitPlanCode` is required for individual candidates. `first` defaults to 20
+and accepts 0–100; `offset` is non-negative. Geographic filters use each person's
+own location, with no household fallback. `targetCount: 0` selects none; omitting
+the target selects all eligible candidates before pagination. Programme discovery
+exposes configured entries only. Existing household queries and mutations retain
+their household behavior.
+
+`excludeValidated: true` excludes people whose individual `validation_status` is
+`VERIFIED` or `NOT_VERIFIED`, before counting, targeting and pagination. Missing,
+null, blank and unsupported statuses remain candidates. The default is `false`
+so existing calls can still select people for revalidation. This is an explicit
+status filter, not a date cutoff. Live candidate counts are computed per request;
+the query is not a persisted list or cached snapshot.
+
+### Saved individual lists and workbooks
+
+`generateIndividualValidationList` uses the individual programme's selection
+service and creates an existing validation batch. `batch.json_ext` stores the
+programme, effective rule/source, resolved editable columns (including option
+overrides), protected display-field definitions, filters and issued counts.
+Ordered identities and descriptive snapshots are stored in existing
+`HouseholdValidationBatchRow` records, marked `INDIVIDUAL_SELECTION` with a null
+`upload_attempt_id`; later upload attempts use different rows. Generation writes
+selection rows and their history in chunks of 500 within the same transaction.
+Preview and re-export read the saved values; later registry or configuration
+edits do not change those values. Decision cells start blank, including on
+revalidation lists.
+
+Editable business cells also start blank, regardless of existing registry
+answers. Only deliberately supplied answers are parsed into updates; issuing a
+list does not pre-fill old values that could later overwrite newer registry
+changes or clear dependants. VERIFIED requires fresh applicable answers, while
+NOT_VERIFIED can leave business cells blank to preserve current values. An
+explicit dependency answer may still clear an inapplicable dependent field.
+Protected descriptive columns continue to carry their configured saved values.
+
+Candidate identities are materialized once for selection and issued counts.
+Snapshots are built from those selected IDs rather than re-evaluating eligibility.
+If a selected identity disappears before its snapshot can be saved, generation
+rolls back and asks the caller to generate again instead of substituting people
+or silently shortening the issued list.
+
+```graphql
+mutation {
+  generateIndividualValidationList(
+    benefitPlanCode: "UMEP", districtCode: "CITY_CODE",
+    excludeValidated: true, targetCount: 100
+  ) { batchId fileName fileBase64 eligibleIndividuals selectedIndividuals generatedAt }
+}
+```
+
+```graphql
+query SavedIndividualList($id: UUID!) {
+  individualValidationList(batchId: $id, first: 20, offset: 0) {
+    batchId columns displayFields items eligibleIndividuals selectedIndividuals hasNextPage
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
+  }
+  individualValidationListExport(batchId: $id) {
+    batchId fileName fileBase64 eligibleIndividuals selectedIndividuals
+    availableIndividuals deletedIndividuals missingIndividuals inaccessibleIndividuals
+  }
+}
+```
+
+`items` contains saved row dictionaries for individuals who are currently active
+and within the caller's access. Preview uses SQL `LIMIT`/`OFFSET` over those saved
+rows rather than loading every snapshot or constructing an in-memory ID list.
+It does not rerun candidate selection. `eligibleIndividuals` and
+`selectedIndividuals` remain the issued counts. Current availability is reported
+separately: `availableIndividuals`, soft-deleted `deletedIndividuals`, physically
+missing `missingIndividuals`, and active `inaccessibleIndividuals` outside the
+caller's scope. `hasNextPage` and offsets refer to the available rows. Re-export
+includes the same available subset in the saved order, with omission counts in
+both the GraphQL response and hidden workbook metadata. A deletion or scope
+change to one person does not block the remaining list.
+
+Generation requires `958001`. Saved preview and re-export require the configured
+history right (`958003`), while parsing requires the upload right (`958002`).
+A reader must have at least one currently accessible selected person, or be the
+batch creator or an administrator. A creator/admin with no accessible people may
+read omission counts and export an empty workbook, but cannot retrieve personal
+snapshots outside their current scope. Historical household batches and workbook
+APIs retain their existing behaviour.
+
+There is no confirmed production UMEP list-size estimate. The paging regression
+covers 2,004 selected individuals. With no `targetCount`, generation still selects
+all eligible individuals; use geographic filters or a target for operational
+workbook sizes. Export and parsing necessarily process the whole workbook in
+memory; this change bounds preview snapshot loading, not workbook memory use.
+
+Protected display columns are configured per programme through
+`individual_workbook_fields`. Each definition supplies `column_name` and exactly
+one of `json_ext_key` or `location_type` (`R`, `D`, `W` or `V`). Labels and identity
+source keys are deployment choices; the backend supplies no UMEP-specific labels.
+UMEP maps `R` to City, `D` (TA) to Constituency, `W` (GVH) to Ward and `V`
+to Neighbourhood. The individual validation workbook intentionally omits
+Constituency: its configured geography columns are City, Ward and Neighbourhood.
+This workbook subset does not remove `D` from the location hierarchy. Its
+workbook display configuration is:
+
+```json
+{
+  "individual_workbook_fields": {
+    "UMEP": [
+      {"column_name": "National ID", "json_ext_key": "national_id"},
+      {"column_name": "Gender", "json_ext_key": "gender"},
+      {"column_name": "City", "location_type": "R"},
+      {"column_name": "Ward", "location_type": "W"},
+      {"column_name": "Neighbourhood", "location_type": "V"}
+    ]
+  }
+}
+```
+
+The source keys and location types must match that deployment's registry. An
+absent programme entry means no extra protected display columns. These
+read-only fields are saved with the issued list and checked during parsing;
+editable business fields continue to use `program_specific_export_columns` and
+`export_column_options_overrides`. Duplicate or reserved display names, invalid
+sources and collisions with editable columns prevent list generation.
+
+The individual workbook contains protected batch/individual identity and
+descriptive fields, plus editable decisions, notes and configured programme
+columns. It does not require a household, household head or Primary Worker.
+`IndividualValidationListService(user).parse(bytes_or_file)` requires the upload
+right (`958002`) and an existing accessible individual batch. It returns global
+file errors and per-row errors/raw values, decisions, notes and parsed JSON-field
+updates; it does **not** save upload attempts or apply updates. `valid_rows` is
+empty on global file errors and otherwise excludes erroneous rows; a valid row
+with `decision is None` must be skipped without applying any fields.
+
+Parsing uses only the batch's saved columns and identity set, checks protected
+values, rejects unknown/mixed batches, foreign/duplicate IDs, unexpected/missing
+headers and formulas, and enforces applicable types, options, numeric bounds,
+dependencies and required fields for VERIFIED decisions. NOT_VERIFIED decisions
+may omit business answers. Excel permits blank business cells; parsing enforces
+the decision-specific requiredness. A blank decision skips programme-field
+validation and updates; a submitted invalid row has no parsed updates to apply.
+
+Current deletion and access checks are per submitted row: a deleted, missing or
+inaccessible individual receives a row error with no parsed updates, while other
+valid rows remain usable. A removed individual's saved protected fields are
+never returned through preview or re-export. Parsing itself creates no upload
+attempts or individual updates.
+
+Household uploads reject an existing batch tagged INDIVIDUAL, including deleted
+or unsupported individual-list formats. This applies to dry run and commit,
+before household attempt rows or batch status can be written. Legacy household
+batches retain their existing upload behaviour.
+
+### Applying individual decisions
+
+`uploadIndividualValidationList` requires `958002` and a known generated individual
+batch. It uses the saved rule, columns and selected identities, then rechecks each
+person's current access, deletion state, source, active-household membership and
+saved geography. It does not reapply `excludeValidated` during upload, so retries
+and corrections remain possible after an accepted decision.
+
+Upload intersects every saved geographic scope. A matching neighbourhood does
+not bypass the saved Ward, Constituency or City scope if a location or its
+parents have moved since generation. For UMEP, Constituency is the existing
+`D`/TA level: saved `taId`, `taCode` or `taCodes` filters are checked through the
+current parent chain even though the workbook omits the Constituency column.
+ID/code alternatives within the same level retain their existing matching
+behaviour. Dry runs and committed uploads perform the same geographic checks;
+an out-of-scope individual receives a row error while other valid rows proceed.
+A City-only batch does not impose an additional Constituency restriction, so a
+move between constituencies within that City can remain valid. Uploading does
+not change the individual's location or the location hierarchy.
+If a batch was generated with conflicting parent/child scopes, regenerate it
+with consistent filters; upload will not silently drop a saved scope.
+
+```graphql
+mutation ValidateIndividuals($file: String!) {
+  uploadIndividualValidationList(fileBase64: $file, dryRun: true, sourceFileName: "checked.xlsx") {
+    batchId dryRun status rowsRead rowsApplied rowsSkipped errors errorMessages
+    wouldUpdate individualsUpdated uploadAttemptId
+  }
+}
+```
+
+Dry run performs parsing and current eligibility checks without changing an
+individual, batch, row or history record. `wouldUpdate` predicts changed individuals;
+`individualsUpdated` is zero in a dry run and counts actual writes after commit.
+Submit again with `dryRun: false` to commit; current state is checked again.
+
+Each committed upload uses one transaction and a new `uploadAttemptId`. These
+commits lock their batch row before reading its attempt summaries and current
+individual state, so simultaneous uploads for the same batch serialize rather
+than overwrite each other's attempt metadata. Committed uploads also lock currently
+accessible selected individual rows in primary-key order before reading their JSON.
+Overlapping batches therefore merge into the latest locked values instead of
+overwriting each other's unrelated updates. Eligibility is checked after acquiring
+these locks. Other writers must also read under a row lock or use an atomic update
+to protect their own merges; this does not repair stale writes by unrelated code.
+Dry runs do not acquire write locks or persist changes; committing still rechecks
+current state.
+
+Valid submitted decisions are recorded as APPLIED even if the individual already has
+the same values; blank decisions are SKIPPED. Expected row errors are recorded
+as ERROR while other valid rows apply, producing PARTIAL_SUCCESS. All-error files
+are FAILED; a file with no errors is PROCESSED. Unknown batches are rejected and
+never created by upload. Unexpected write failures roll back the entire attempt.
+
+Those outcomes describe individual attempts. Once a batch is PROCESSED or
+PARTIAL_SUCCESS, a retry applying zero decisions retains that batch status, including
+all-error and blank-only retries. An attempt applying decisions sets the batch to
+that attempt's outcome; the batch status is not a cumulative count of verified people.
+Every committed attempt still saves its own outcome, and batch JSON records
+`last_upload_attempt_id` and `last_upload_status`. The batch picker shows the retained
+batch status; immediate results and attempt history show the retry's actual outcome.
+Batch upload time, filename and compact error summary describe the latest attempt.
+
+Decisions update `Individual.json_ext.validation_status` directly, together with
+valid configured fields and notes. On a decided row, blank or whitespace-only notes
+clear an existing `validation_notes` value to JSON null; supplied notes replace it.
+Blank-decision rows leave notes and all other values unchanged. Unrelated JSON, household status,
+membership and primary workers are preserved. An identical retry creates an audit
+attempt and result rows without an unnecessary individual save/history entry.
+Corrections create new attempts without replacing earlier decisions. Existing
+Individual history and validation batch rows supply the audit trail.
+
+```graphql
+query IndividualValidationHistory($batch: UUID!, $attempt: UUID!) {
+  individualValidationBatches(first: 20, offset: 0) {
+    count hasNextPage
+    items { batchId benefitPlanCode generatedAt uploadedAt sourceFileName status selectedIndividuals }
+  }
+  individualValidationAttempts(batchId: $batch) { count attempts }
+  individualValidationAttemptRows(batchId: $batch, uploadAttemptId: $attempt, first: 20, offset: 0) {
+    count items hasNextPage
+  }
+  individualValidationErrorReport(batchId: $batch, uploadAttemptId: $attempt) {
+    fileName fileBase64 errorCount
+  }
+}
+```
+
+`individualValidationBatches` requires `958003` and lists recent issued individual
+batch summaries in generation order. It returns programme, dates, filename,
+status and issued-person count, with no selected identities or raw snapshots.
+Creators/admins can see their batch metadata; other readers need current access
+to at least one active selected person. Scope filtering occurs before counts and
+SQL pagination (`first` defaults to 20, maximum 100). This supports choosing an
+issued list in the frontend without entering its UUID.
+
+Attempt history/rows require `958003`; the attempt-specific CSV error report requires
+`958004`. No new rights are introduced. Batch creators, administrators or users
+with current access to selected individuals may access attempt metadata, subject
+to those rights. Personal row data is returned only for individuals currently
+visible to the reader; other rows have `redacted: true`, no individual ID and empty
+raw/JSON values. CSV reports use the saved programme columns and the same redaction.
+Rows without a linked individual (for example, invalid or foreign workbook identities)
+retain their correction error message, while their submitted raw/JSON values and
+identity remain hidden. Linked individuals who are deleted or outside current access
+still have their row-specific error message redacted along with their personal data.
+Deleted or inaccessible people produce individual row errors rather than blocking
+processing of the rest of an authorized upload.
+
+Attempt summaries retain counters, outcome, actor, filename and timing metadata;
+new summaries do not duplicate the full `error_messages` list. The immediate
+upload/dry-run response still includes those messages. Detailed committed errors
+remain on their attempt rows and in the CSV report, with a compact current-attempt
+error summary on the batch.
+
+Attempt rows use SQL pagination: `first` defaults to 20 and accepts integers from
+0 to 100; `offset` defaults to 0 and must be a non-negative integer. Invalid
+ranges are rejected. `count` is the total number of rows in that
+attempt, including redacted rows; `items` is the requested page and `hasNextPage`
+indicates whether more rows remain. Clients that previously assumed all rows were
+returned must paginate. The attempt-specific CSV always includes every error row,
+independent of the result page size, and applies the same current-access redaction.
 
 ---
 
@@ -656,14 +1005,3 @@ cd openimis-be_py/openIMIS
 PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" \
 ../.venv/bin/python manage.py test household_validation --keepdb
 ```
-
-### Latest Result
-
-```text
-Found 161 tests.
-Ran 161 tests in 0.7s
-
-OK
-```
-
-✅ All 161 tests pass.

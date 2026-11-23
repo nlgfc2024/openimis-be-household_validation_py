@@ -1,7 +1,7 @@
 import base64
 
 import graphene
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 
 from household_validation.apps import HouseholdValidationConfig
@@ -11,10 +11,21 @@ from household_validation.excel import (
     is_primary_worker_rejection,
 )
 from household_validation.gql_mutations import (
+    UploadIndividualValidationListMutation,
+    GenerateIndividualValidationListMutation,
+    IndividualValidationGenerateResultGQLType,
+    individual_workbook_result,
     GenerateHouseholdValidationListMutation,
     UploadHouseholdValidationListMutation,
 )
 from household_validation.gql_queries import (
+    IndividualValidationAttemptsGQLType,
+    IndividualValidationBatchesGQLType,
+    IndividualValidationAttemptRowsGQLType,
+    IndividualValidationErrorReportGQLType,
+    IndividualValidationSavedListGQLType,
+    ValidationProgrammeGQLType,
+    IndividualValidationCandidatesGQLType,
     HouseholdValidationBatchRowsGQLType,
     HouseholdValidationBatchesGQLType,
     HouseholdValidationErrorReportGQLType,
@@ -23,6 +34,10 @@ from household_validation.gql_queries import (
     HouseholdValidationPreviewPageInfoGQLType,
     HouseholdValidationProjectsGQLType,
 )
+from household_validation.individual_selection import EligibleIndividualSelectionService
+from household_validation.individual_lists import IndividualValidationListService
+from household_validation.individual_upload import IndividualValidationUploadService
+from household_validation.programmes import configured_programmes
 from household_validation.models import (
     HouseholdValidationBatch,
     HouseholdValidationBatchRow,
@@ -56,6 +71,12 @@ VALIDATION_FILTER_ARG_NAMES = {
 }
 
 
+def household_batch_scope(prefix=""):
+    """Legacy history must not expose individual snapshots without their access checks."""
+    field = f"{prefix}json_ext__subject"
+    return Q(**{f"{field}__isnull": True}) | ~Q(**{field: "INDIVIDUAL"})
+
+
 def validation_filter_args():
     return {
         "region_id": graphene.Argument(graphene.Int, required=False),
@@ -80,6 +101,41 @@ def validation_filter_args():
 
 
 class Query(graphene.ObjectType):
+    individual_validation_batches = graphene.Field(
+        IndividualValidationBatchesGQLType,
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
+    )
+    individual_validation_attempts = graphene.Field(
+        IndividualValidationAttemptsGQLType, batch_id=graphene.UUID(required=True),
+    )
+    individual_validation_attempt_rows = graphene.Field(
+        IndividualValidationAttemptRowsGQLType, batch_id=graphene.UUID(required=True),
+        upload_attempt_id=graphene.UUID(required=True),
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
+    )
+    individual_validation_error_report = graphene.Field(
+        IndividualValidationErrorReportGQLType, batch_id=graphene.UUID(required=True),
+        upload_attempt_id=graphene.UUID(required=True),
+    )
+    individual_validation_list = graphene.Field(
+        IndividualValidationSavedListGQLType, batch_id=graphene.UUID(required=True),
+        first=graphene.Int(default_value=20), offset=graphene.Int(default_value=0),
+    )
+    individual_validation_list_export = graphene.Field(
+        IndividualValidationGenerateResultGQLType, batch_id=graphene.UUID(required=True),
+    )
+    validation_programmes = graphene.List(ValidationProgrammeGQLType)
+    individual_validation_candidates = graphene.Field(
+        IndividualValidationCandidatesGQLType,
+        exclude_validated=graphene.Argument(graphene.Boolean, default_value=False),
+        first=graphene.Argument(graphene.Int, default_value=20),
+        offset=graphene.Argument(graphene.Int, default_value=0),
+        **{
+            key: (graphene.Argument(graphene.String, required=True) if key == "benefit_plan_code" else value)
+            for key, value in validation_filter_args().items()
+            if key != "exclude_verified_after"
+        },
+    )
     household_validation_preview = graphene.Field(
         HouseholdValidationPreviewGQLType,
         first=graphene.Argument(graphene.Int, required=False),
@@ -113,6 +169,54 @@ class Query(graphene.ObjectType):
         HouseholdValidationErrorReportGQLType,
         batch_id=graphene.Argument(graphene.UUID, required=True),
     )
+
+    def resolve_individual_validation_batches(parent, info, first=20, offset=0):
+        return IndividualValidationUploadService(info.context.user).batches(first=first, offset=offset)
+
+    def resolve_individual_validation_attempts(parent, info, batch_id):
+        attempts = IndividualValidationUploadService(info.context.user).history(batch_id)
+        return IndividualValidationAttemptsGQLType(attempts=attempts, count=len(attempts))
+
+    def resolve_individual_validation_attempt_rows(parent, info, batch_id, upload_attempt_id, first=20, offset=0):
+        page = IndividualValidationUploadService(info.context.user).attempt_rows(
+            batch_id, upload_attempt_id, first=first, offset=offset,
+        )
+        return IndividualValidationAttemptRowsGQLType(**page)
+
+    def resolve_individual_validation_error_report(parent, info, batch_id, upload_attempt_id):
+        content, count = IndividualValidationUploadService(info.context.user).error_report(batch_id, upload_attempt_id)
+        return IndividualValidationErrorReportGQLType(
+            batch_id=batch_id, upload_attempt_id=upload_attempt_id, error_count=count,
+            file_name=f"individual_validation_errors_{batch_id}_{upload_attempt_id}.csv",
+            file_base64=base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        )
+
+    def resolve_individual_validation_list(parent, info, batch_id, first=20, offset=0):
+        return IndividualValidationListService(info.context.user).preview(batch_id, first, offset)
+
+    def resolve_individual_validation_list_export(parent, info, batch_id):
+        batch, content = IndividualValidationListService(info.context.user).export(batch_id)
+        return individual_workbook_result(batch, content)
+
+    def resolve_validation_programmes(parent, info):
+        Query._check_permissions(
+            info.context.user, HouseholdValidationConfig.gql_query_household_validation_rule_perms,
+        )
+        return configured_programmes()
+
+    def resolve_individual_validation_candidates(parent, info, first=20, offset=0, **kwargs):
+        Query._check_permissions(
+            info.context.user, HouseholdValidationConfig.gql_query_household_validation_rule_perms,
+        )
+        if first is None or first < 0 or first > 100 or offset is None or offset < 0:
+            raise ValidationError("first must be between 0 and 100 and offset must be non-negative.")
+        result = EligibleIndividualSelectionService(info.context.user).select(**kwargs)
+        return IndividualValidationCandidatesGQLType(
+            eligible_individuals=result.eligible_individuals,
+            selected_individuals=result.selected_individuals,
+            items=list(result.individuals[offset:offset + first]),
+            has_next_page=offset + first < result.selected_individuals,
+        )
 
     def resolve_household_validation_preview(parent, info, **kwargs):
         Query._check_permissions(
@@ -165,7 +269,7 @@ class Query(graphene.ObjectType):
             info.context.user,
             HouseholdValidationConfig.gql_query_household_validation_history_perms,
         )
-        queryset = HouseholdValidationBatch.objects.filter(is_deleted=False)
+        queryset = HouseholdValidationBatch.objects.filter(household_batch_scope(), is_deleted=False)
         if kwargs.get("status"):
             queryset = queryset.filter(status=kwargs["status"])
         batches = list(queryset.order_by("-date_created"))
@@ -182,7 +286,7 @@ class Query(graphene.ObjectType):
         queryset = HouseholdValidationBatchRow.objects.filter(
             batch_id=kwargs["batch_id"],
             is_deleted=False,
-        )
+        ).filter(household_batch_scope("batch__"))
         if kwargs.get("status"):
             queryset = queryset.filter(status=kwargs["status"])
         rows = list(queryset.order_by("row_number"))
@@ -196,18 +300,18 @@ class Query(graphene.ObjectType):
             info.context.user,
             HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
         )
+        rejected_scope = (
+            Q(status__in=(HouseholdValidationBatchRow.Status.REJECTED, HouseholdValidationBatchRow.Status.ERROR))
+            | Q(json_ext__household_status=NOT_VERIFIED)
+            | Q(json_ext__participant_status=NOT_VERIFIED)
+        )
         rows = list(
             HouseholdValidationBatchRow.objects.filter(
                 batch_id=kwargs["batch_id"],
                 upload_attempt_id=kwargs["upload_attempt_id"],
                 is_deleted=False,
             ).filter(
-                Q(status__in=(
-                    HouseholdValidationBatchRow.Status.REJECTED,
-                    HouseholdValidationBatchRow.Status.ERROR,
-                ))
-                | Q(json_ext__household_status=NOT_VERIFIED)
-                | Q(json_ext__participant_status=NOT_VERIFIED),
+                rejected_scope & household_batch_scope("batch__"),
             ).order_by("row_number")
         )
         report, _ = build_rejected_households_workbook_bytes(rows)
@@ -227,6 +331,7 @@ class Query(graphene.ObjectType):
             HouseholdValidationConfig.gql_query_household_validation_error_report_perms,
         )
         batch = HouseholdValidationBatch.objects.get(
+            household_batch_scope(),
             id=kwargs["batch_id"],
             is_deleted=False,
         )
@@ -259,5 +364,7 @@ class Query(graphene.ObjectType):
 
 
 class Mutation(graphene.ObjectType):
+    upload_individual_validation_list = UploadIndividualValidationListMutation.Field()
+    generate_individual_validation_list = GenerateIndividualValidationListMutation.Field()
     generate_household_validation_list = GenerateHouseholdValidationListMutation.Field()
     upload_household_validation_list = UploadHouseholdValidationListMutation.Field()

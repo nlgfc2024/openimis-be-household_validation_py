@@ -24,6 +24,8 @@ VALIDATION_LIST_SHEET = "Validation List"
 PROJECT_SELECTION_TYPE_INTENT = "INTENT"
 VALIDATION_STATUS_VERIFIED = "VERIFIED"
 VALIDATION_STATUS_NOT_VERIFIED = "NOT_VERIFIED"
+VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
+PRIMARY_WORKER_NATIONAL_ID_REQUIRED = "PRIMARY_WORKER_NATIONAL_ID_REQUIRED"
 
 OPTIONAL_UPLOAD_COLUMNS = {
     PARTICIPANT_STATUS_COLUMN,
@@ -68,8 +70,16 @@ class UploadedValidationRow:
 
 
 @dataclass(frozen=True)
+class InvalidWorkbookRow:
+    uploaded_row: UploadedValidationRow
+    errors: list[str]
+    error_code: str = VALIDATION_ERROR_CODE
+
+
+@dataclass(frozen=True)
 class WorkbookParseResult:
     rows: list[UploadedValidationRow] = field(default_factory=list)
+    invalid_rows: list[InvalidWorkbookRow] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     error_row_numbers: frozenset[int] = field(default_factory=frozenset)
     invalid_group_keys: frozenset[str] = field(default_factory=frozenset)
@@ -154,6 +164,7 @@ def parse_validation_workbook(file_or_bytes):
 
     project_options = _read_project_options(workbook)
     rows = []
+    invalid_rows = []
     error_row_numbers = set()
     invalid_group_keys = set()
     total_rows_read = 0
@@ -198,30 +209,31 @@ def parse_validation_workbook(file_or_bytes):
             row_errors.append(
                 f"Row {row_number}: project can only be selected for the Primary Worker"
             )
+        uploaded_row = UploadedValidationRow(
+            row_number=row_number,
+            values=values,
+            # Verification is derived for the whole household by the upload
+            # service after projecting all Primary Worker values.
+            verified=None,
+            primary_worker=primary_worker,
+            validation_date=validation_date,
+            project_name=project_name,
+            project_id=project_id,
+            notes=_clean(values.get("validation_notes")),
+            business_updates=business_updates,
+        )
         if row_errors:
             errors.extend(row_errors)
             error_row_numbers.add(row_number)
             group_key = str(values.get("group_uuid") or "").strip()
             if group_key:
                 invalid_group_keys.add(group_key)
+            invalid_rows.append(InvalidWorkbookRow(uploaded_row, row_errors))
             continue
-        rows.append(
-            UploadedValidationRow(
-                row_number=row_number,
-                values=values,
-                # Verification is derived for the whole household by the upload
-                # service after projecting all Primary Worker values.
-                verified=None,
-                primary_worker=primary_worker,
-                validation_date=validation_date,
-                project_name=project_name,
-                project_id=project_id,
-                notes=_clean(values.get("validation_notes")),
-                business_updates=business_updates,
-            )
-        )
+        rows.append(uploaded_row)
     return WorkbookParseResult(
         rows=rows,
+        invalid_rows=invalid_rows,
         errors=errors,
         error_row_numbers=frozenset(error_row_numbers),
         invalid_group_keys=frozenset(invalid_group_keys),
@@ -279,12 +291,14 @@ def _dependency_state(col, values, column_registry):
     return "not_applicable", dep_col
 
 
-def _parse_extra_columns(row_number, values, column_registry):
+def _parse_extra_columns(row_number, values, column_registry, *, require_fields=True):
     """Generic parser for household_validation.apps's
     ``program_specific_export_columns`` column definitions: validates each
     configured column's cell against its ``type``/``options``/``min``/``max``
     and ``required``/``depends_on`` rules, producing the ``Individual.json_ext``
     updates for valid rows (see ``UploadedValidationRow.business_updates``).
+    ``require_fields=False`` allows blank answers for an individual NOT_VERIFIED
+    decision, while preserving validation of supplied values and dependencies.
     """
     updates = {}
     errors = []
@@ -313,7 +327,7 @@ def _parse_extra_columns(row_number, values, column_registry):
             continue
 
         if raw_value is None:
-            if col.get("required"):
+            if require_fields and col.get("required"):
                 errors.append(f"Row {row_number}: {col['column_name']} is required")
             continue
 

@@ -8,6 +8,8 @@ from household_validation.apps import HouseholdValidationConfig
 from household_validation.excel import ExcelValidationListExporter
 from household_validation.gql_permissions import require_permissions
 from household_validation.models import HouseholdValidationBatch
+from household_validation.individual_lists import IndividualValidationListService
+from household_validation.individual_upload import IndividualValidationUploadService
 from household_validation.selection import (
     female_headed_percentage,
     reserve_percentage,
@@ -31,6 +33,100 @@ class HouseholdValidationVillageBreakdownGQLType(graphene.ObjectType):
     selected_households = graphene.Int()
     selected_individuals = graphene.Int()
     reserve_households = graphene.Int()
+
+
+class IndividualValidationGenerateResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    file_name = graphene.String()
+    file_base64 = graphene.String()
+    eligible_individuals = graphene.Int()
+    selected_individuals = graphene.Int()
+    available_individuals = graphene.Int()
+    deleted_individuals = graphene.Int()
+    missing_individuals = graphene.Int()
+    inaccessible_individuals = graphene.Int()
+    generated_at = graphene.DateTime()
+
+
+class IndividualValidationUploadResultGQLType(graphene.ObjectType):
+    batch_id = graphene.UUID()
+    upload_attempt_id = graphene.UUID()
+    dry_run = graphene.Boolean()
+    status = graphene.String()
+    rows_read = graphene.Int()
+    rows_applied = graphene.Int()
+    rows_skipped = graphene.Int()
+    errors = graphene.Int()
+    error_messages = graphene.List(graphene.String)
+    individuals_verified = graphene.Int()
+    individuals_not_verified = graphene.Int()
+    individuals_updated = graphene.Int()
+    would_update = graphene.Int()
+
+
+class UploadIndividualValidationListMutation(graphene.Mutation):
+    Output = IndividualValidationUploadResultGQLType
+
+    class Arguments:
+        file_base64 = graphene.String(required=True)
+        dry_run = graphene.Boolean(default_value=False)
+        source_file_name = graphene.String()
+
+    @classmethod
+    def mutate(cls, root, info, file_base64, dry_run=False, source_file_name=None):
+        require_permissions(info.context.user,
+                            HouseholdValidationConfig.gql_mutation_upload_household_validation_list_perms,
+                            error_class=PermissionDenied)
+        try:
+            content = base64.b64decode(file_base64, validate=True)
+        except (ValueError, TypeError) as exc:
+            raise ValidationError("Invalid base64 validation workbook.") from exc
+        return IndividualValidationUploadResultGQLType(**IndividualValidationUploadService(info.context.user).upload(
+            content, dry_run=dry_run, source_file_name=source_file_name,
+        ))
+
+
+def individual_workbook_result(batch, content):
+    counts = getattr(batch, "_individual_read_counts", {
+        "available_individuals": batch.json_ext["selected_individuals"],
+        "deleted_individuals": 0, "missing_individuals": 0, "inaccessible_individuals": 0,
+    })
+    return IndividualValidationGenerateResultGQLType(
+        batch_id=batch.pk, file_name=f"individual_validation_{batch.pk}.xlsx",
+        file_base64=base64.b64encode(content).decode("ascii"), generated_at=batch.generated_at,
+        eligible_individuals=batch.json_ext["eligible_individuals"],
+        selected_individuals=batch.json_ext["selected_individuals"],
+        **counts,
+    )
+
+
+class GenerateIndividualValidationListMutation(graphene.Mutation):
+    Output = IndividualValidationGenerateResultGQLType
+
+    class Arguments:
+        benefit_plan_code = graphene.String(required=True)
+        target_count = graphene.Int()
+        exclude_validated = graphene.Boolean(default_value=False)
+        region_id = graphene.Int()
+        region_code = graphene.String()
+        district_id = graphene.Int()
+        district_code = graphene.String()
+        ta_id = graphene.Int()
+        ta_code = graphene.String()
+        ta_codes = graphene.List(graphene.String)
+        gvh_codes = graphene.List(graphene.String)
+        village_id = graphene.Int()
+        village_code = graphene.String()
+        village_codes = graphene.List(graphene.String)
+        hotspot_id = graphene.String()
+        hotspot_code = graphene.String()
+        catchment_id = graphene.String()
+        catchment_code = graphene.String()
+
+    @classmethod
+    def mutate(cls, root, info, **data):
+        batch, content = IndividualValidationListService(info.context.user).generate(**data)
+        return individual_workbook_result(batch, content)
 
 
 class HouseholdValidationGenerateResultGQLType(graphene.ObjectType):
@@ -65,6 +161,7 @@ class HouseholdValidationUploadResultGQLType(graphene.ObjectType):
     households_with_multiple_primary_workers = graphene.Int()
     errors = graphene.Int()
     error_messages = graphene.List(graphene.String)
+    error_codes = graphene.List(graphene.String)
 
 
 class GenerateHouseholdValidationListMutation(graphene.Mutation):
@@ -182,6 +279,9 @@ class GenerateHouseholdValidationListMutation(graphene.Mutation):
             batch_id=batch.id,
             projects=projects,
             additional_columns=service.export_columns or [],
+            require_primary_worker_national_id=bool(
+                resolved_rule.get("require_primary_worker_national_id")
+            ),
         ).export_bytes()
         file_name = f"household_validation_{batch.id}.xlsx"
         return HouseholdValidationGenerateResultGQLType(

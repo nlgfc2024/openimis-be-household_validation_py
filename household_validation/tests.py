@@ -82,10 +82,13 @@ from household_validation.services import (
 )
 from household_validation.schema import Query
 from household_validation.upload import (
+    InvalidWorkbookRow,
+    PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
     PROJECT_SELECTION_TYPE_INTENT,
     VALIDATION_STATUS_NOT_VERIFIED,
     VALIDATION_LIST_SHEET,
     UploadedValidationRow,
+    WorkbookParseResult,
     build_validation_error_report_csv,
     build_validation_json_ext,
     member_structural_errors,
@@ -93,7 +96,28 @@ from household_validation.upload import (
 )
 from household_validation.wealth import get_household_pmt_score, get_household_wealth_quintile
 
-PWP_EXPORT_COLUMNS = DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]
+PWP_EXPORT_COLUMNS = [
+    DEFAULT_CONFIG["program_specific_export_columns"]["PWP"][0],
+    {
+        "key": "business_type",
+        "column_name": "Type of Business",
+        "target_individual_json_ext_key": "type_of_business",
+        "type": "select",
+        "options": ["Crop farming", "Livestock farming", "Grocery shop"],
+        "required": True,
+        "depends_on": {"key": "has_business", "equals": "Yes"},
+    },
+    {
+        "key": "business_duration",
+        "column_name": "Business Period (in years)",
+        "target_individual_json_ext_key": "business_period",
+        "type": "number",
+        "min": 0,
+        "max": 100,
+        "required": True,
+        "depends_on": {"key": "has_business", "equals": "Yes"},
+    },
+]
 
 # A generic non-PWP eligibility rule, not shipped as a default but the kind
 # of thing a deployment adds via a ModuleConfiguration override.
@@ -136,7 +160,10 @@ class HouseholdValidationConfigTest(TestCase):
         self.assertEqual(list(DEFAULT_CONFIG["program_eligibility_rules"]), ["PWP"])
         self.assertEqual(list(DEFAULT_CONFIG["program_specific_export_columns"]), ["PWP"])
         self.assertEqual(
-            [col["key"] for col in PWP_EXPORT_COLUMNS],
+            [
+                col["key"]
+                for col in DEFAULT_CONFIG["program_specific_export_columns"]["PWP"]
+            ],
             ["has_business", "business_type", "business_duration"],
         )
 
@@ -264,12 +291,41 @@ class ColumnOptionOverridesTest(TestCase):
 
     def test_export_columns_reflect_the_override(self):
         service = EligibleHouseholdSelectionService()
-        with patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
-            "business_type": ["Retail shop", "Transport"],
-        }):
+        configured_column = {
+            "key": "custom_choice",
+            "column_name": "Custom Choice",
+            "target_individual_json_ext_key": "custom_choice",
+            "type": "select",
+            "options": ["Option A"],
+            "required": False,
+        }
+        with (
+            patch.object(
+                HouseholdValidationConfig,
+                "program_specific_export_columns",
+                {"PWP": [configured_column]},
+            ),
+            patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
+                "custom_choice": ["Option A", "Option B"],
+            }),
+        ):
             service._export_columns = service._resolve_export_columns(None)
-        business_type = next(col for col in service._export_columns if col["key"] == "business_type")
-        self.assertEqual(business_type["options"], ["Retail shop", "Transport"])
+        custom_choice = next(col for col in service._export_columns if col["key"] == "custom_choice")
+        self.assertEqual(custom_choice["options"], ["Option A", "Option B"])
+
+    def test_saved_business_columns_are_exported_from_saved_configuration(self):
+        service = EligibleHouseholdSelectionService()
+        with patch.object(
+            HouseholdValidationConfig,
+            "program_specific_export_columns",
+            {"PWP": PWP_EXPORT_COLUMNS},
+        ):
+            columns = service._resolve_export_columns("PWP")
+
+        self.assertEqual(
+            [column["key"] for column in columns],
+            ["has_business", "business_type", "business_duration"],
+        )
 
     def test_upload_validates_against_the_override_not_the_original_default(self):
         workbook = ValidationUploadParserTest()._upload_workbook()
@@ -279,20 +335,46 @@ class ColumnOptionOverridesTest(TestCase):
         worksheet.cell(2, columns.index(BUSINESS_TYPE_COLUMN) + 1, "Retail shop")
         worksheet.cell(2, columns.index(BUSINESS_DURATION_COLUMN) + 1, 1)
         content = ValidationUploadParserTest()._workbook_bytes(workbook)
-        with patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
-            "business_type": ["Retail shop", "Transport"],
-        }):
+        with (
+            patch.object(
+                HouseholdValidationConfig,
+                "program_specific_export_columns",
+                {"PWP": PWP_EXPORT_COLUMNS},
+            ),
+            patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
+                "business_type": ["Retail shop", "Transport"],
+            }),
+        ):
             parsed = parse_validation_workbook(content)
         self.assertEqual(parsed.errors, [])
         self.assertEqual(parsed.rows[0].business_updates["type_of_business"], "Retail shop")
         # The pre-override default option is no longer accepted once overridden.
         worksheet.cell(2, columns.index(BUSINESS_TYPE_COLUMN) + 1, "Crop farming")
         content = ValidationUploadParserTest()._workbook_bytes(workbook)
-        with patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
-            "business_type": ["Retail shop", "Transport"],
-        }):
+        with (
+            patch.object(
+                HouseholdValidationConfig,
+                "program_specific_export_columns",
+                {"PWP": PWP_EXPORT_COLUMNS},
+            ),
+            patch.object(HouseholdValidationConfig, "export_column_options_overrides", {
+                "business_type": ["Retail shop", "Transport"],
+            }),
+        ):
             parsed = parse_validation_workbook(content)
         self.assertIn("Row 2: Type of Business is not a valid option", parsed.errors)
+
+
+class LegacyBusinessColumnsTestMixin:
+    def setUp(self):
+        super().setUp()
+        for field, value in (
+            ("program_specific_export_columns", {"PWP": PWP_EXPORT_COLUMNS}),
+            ("export_column_options_overrides", {}),
+        ):
+            patcher = patch.object(HouseholdValidationConfig, field, value)
+            patcher.start()
+            self.addCleanup(patcher.stop)
 
 
 class RejectedBatchRowsQueryTest(TestCase):
@@ -305,7 +387,7 @@ class RejectedBatchRowsQueryTest(TestCase):
         info = MagicMock()
         info.context.user = user
         rejected_row = MagicMock()
-        rejected_row.json_ext = {"error_code": "MULTIPLE_PRIMARY_WORKERS"}
+        rejected_row.json_ext = {"error_code": "VALIDATION_ERROR"}
         rejected_row.raw_row = {
             "form_number": "FORM-001",
             "group_uuid": "group-1",
@@ -313,7 +395,7 @@ class RejectedBatchRowsQueryTest(TestCase):
         rejected_row.group_id = "group-1"
         rejected_row.row_number = 2
         rejected_row.error_message = (
-            "household has more than one primary worker"
+            "Row 2: Please fill in a valid national_id for the selected primary worker"
         )
         upload_attempt_id = "01a03ab4-c5ac-7b78-a485-f321e7d092f8"
         filter_mock.return_value.filter.return_value.order_by.return_value = [rejected_row]
@@ -349,6 +431,10 @@ class RejectedBatchRowsQueryTest(TestCase):
         workbook = load_workbook(BytesIO(base64.b64decode(result.file_base64)))
         self.assertEqual(workbook.active.title, "Rejected Households")
         self.assertEqual(workbook.active.max_row, 2)
+        self.assertEqual(
+            workbook.active.cell(2, 4).value,
+            rejected_row.error_message,
+        )
 
 
 class RejectedHouseholdsWorkbookTest(TestCase):
@@ -1213,7 +1299,7 @@ class ProgramBasedGenerationIntegrationTest(TestCase):
 
 
 class HotspotAndMicroCatchmentResolutionTest(TestCase):
-    @patch("household_validation.services.Hotspot.objects.filter")
+    @patch("household_validation.geography.Hotspot.objects.filter")
     def test_resolve_hotspot_filters_by_uuid_code_and_validity(self, filter_mock):
         filter_mock.return_value.first.return_value = "hotspot-instance"
         service = EligibleHouseholdSelectionService()
@@ -1228,7 +1314,7 @@ class HotspotAndMicroCatchmentResolutionTest(TestCase):
         service = EligibleHouseholdSelectionService()
         self.assertIsNone(service._resolve_hotspot(None, None))
 
-    @patch("household_validation.services.MicroCatchment.objects.filter")
+    @patch("household_validation.geography.MicroCatchment.objects.filter")
     def test_resolve_micro_catchment_filters_by_uuid_code_and_validity(self, filter_mock):
         filter_mock.return_value.first.return_value = "catchment-instance"
         service = EligibleHouseholdSelectionService()
@@ -1305,7 +1391,7 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
 
         with (
             patch.object(service, "_resolve_micro_catchment", return_value=micro_catchment) as resolve_mock,
-            patch("household_validation.services.Hotspot.objects.filter", return_value=hotspot_queryset),
+            patch("household_validation.geography.Hotspot.objects.filter", return_value=hotspot_queryset),
         ):
             result = service._apply_location_filters(queryset, catchment_code="MC01")
 
@@ -1326,7 +1412,7 @@ class LocationFilterHotspotAndCatchmentTest(TestCase):
         micro_catchment.gvhs.filter.return_value.values_list.return_value = ["GVH01"]
 
         with patch(
-            "household_validation.services.Hotspot.objects.filter",
+            "household_validation.geography.Hotspot.objects.filter",
             return_value=hotspot_queryset,
         ):
             location_filter = service._micro_catchment_location_filter(micro_catchment)
@@ -1712,7 +1798,7 @@ class GraphQLPermissionTest(TestCase):
             require_permissions(None, ["958001"])
 
 
-class ValidationUploadParserTest(TestCase):
+class ValidationUploadParserTest(LegacyBusinessColumnsTestMixin, TestCase):
     def test_business_header_aliases_and_whitespace(self):
         workbook = self._upload_workbook()
         worksheet = workbook[VALIDATION_LIST_SHEET]
@@ -1804,8 +1890,10 @@ class ValidationUploadParserTest(TestCase):
         worksheet = workbook[VALIDATION_LIST_SHEET]
         project_column = EXCEL_COLUMNS.index("project") + 1
         primary_worker_column = EXCEL_COLUMNS.index("primary_worker") + 1
+        national_id_column = EXCEL_COLUMNS.index("national_id") + 1
         worksheet.cell(row=2, column=project_column, value="Road Works")
         worksheet.cell(row=2, column=primary_worker_column, value="YES")
+        worksheet.cell(row=2, column=national_id_column, value="NAT-001")
 
         parsed = parse_validation_workbook(self._workbook_bytes(workbook))
 
@@ -1815,6 +1903,32 @@ class ValidationUploadParserTest(TestCase):
         self.assertIsNone(parsed.rows[0].verified)
         self.assertEqual(parsed.rows[0].primary_worker, True)
         self.assertEqual(PROJECT_SELECTION_TYPE_INTENT, "INTENT")
+
+    def test_parser_does_not_globally_require_primary_worker_national_id(self):
+        columns = _all_columns()
+        for primary_worker, national_id in (
+            ("YES", None),
+            ("YES", " NAT-001 "),
+            ("NO", None),
+            (None, None),
+        ):
+            with self.subTest(primary_worker=primary_worker, national_id=national_id):
+                workbook = self._upload_workbook()
+                worksheet = workbook[VALIDATION_LIST_SHEET]
+                worksheet.cell(2, columns.index("primary_worker") + 1, primary_worker)
+                worksheet.cell(2, columns.index("national_id") + 1, national_id)
+
+                parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+                self.assertEqual(parsed.errors, [])
+
+    def test_removed_business_columns_are_optional_when_absent_from_workbook(self):
+        workbook = self._upload_workbook(extra_columns=[PWP_EXPORT_COLUMNS[0]])
+
+        parsed = parse_validation_workbook(self._workbook_bytes(workbook))
+
+        self.assertEqual(parsed.errors, [])
+        self.assertEqual(parsed.rows[0].business_updates, {})
 
     def test_parse_validation_workbook_reports_missing_required_columns(self):
         workbook = Workbook()
@@ -1984,7 +2098,30 @@ class ValidationUploadParserTest(TestCase):
         return output.getvalue()
 
 
-class ExcelValidationListExporterTest(TestCase):
+class ExcelValidationListExporterTest(LegacyBusinessColumnsTestMixin, TestCase):
+    def test_export_highlights_blank_national_id_only_when_programme_requires_it(self):
+        workbook = ExcelValidationListExporter(
+            self._selection_result(member_count=2),
+            "batch-1",
+            require_primary_worker_national_id=True,
+        ).export_workbook()
+        worksheet = workbook[VALIDATION_LIST_SHEET]
+        worker_col = self._cell(worksheet, "primary_worker").column_letter
+        national_id_col = self._cell(worksheet, "national_id").column_letter
+        required_formula = (
+            f'AND(UPPER(TRIM(${worker_col}2&""))="YES",'
+            f'LEN(TRIM(${national_id_col}2&""))=0)'
+        )
+
+        self.assertTrue(any(
+            str(formatting.sqref) == f"{national_id_col}2:{national_id_col}3"
+            and any(
+                rule.formula == [required_formula]
+                for rule in worksheet.conditional_formatting[formatting]
+            )
+            for formatting in worksheet.conditional_formatting
+        ))
+
     def test_export_without_extra_columns_preserves_core_workbook_and_upload(self):
         from household_validation.excel import (
             PRIMARY_WORKER_ANSWERS_RANGE, PRIMARY_WORKER_NO_RANGE,
@@ -2805,6 +2942,69 @@ class UploadHardeningTest(TestCase):
             _prefetched_objects_cache={"groupindividuals": members},
         )
 
+    def test_configured_national_id_requirement_accepts_stored_individual_id(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "PWP"})
+        group_individual = SimpleNamespace(
+            individual=SimpleNamespace(json_ext={"national_id": "NAT-001"})
+        )
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, batch)
+
+        self.assertEqual(validated.rows, [row])
+        self.assertEqual(validated.errors, [])
+
+    def test_configured_national_id_requirement_rejects_when_upload_and_registry_are_blank(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "PWP"})
+        group_individual = SimpleNamespace(individual=SimpleNamespace(json_ext={}))
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, batch)
+
+        self.assertEqual(validated.rows, [])
+        self.assertEqual(
+            validated.errors,
+            ["Row 2: national_id is required for the selected primary worker"],
+        )
+        self.assertEqual(
+            validated.invalid_rows[0].error_code,
+            "PRIMARY_WORKER_NATIONAL_ID_REQUIRED",
+        )
+        self.assertEqual(validated.invalid_group_keys, frozenset({"group-1"}))
+
+    def test_unconfigured_programme_fails_configuration_validation(self):
+        row = self._uploaded_row(2, "member-1", True)
+        parsed = WorkbookParseResult(rows=[row])
+        batch = SimpleNamespace(json_ext={"benefit_plan_code": "OTHER"})
+        service = HouseholdValidationUploadService()
+
+        with self.assertRaises(ValidationError):
+            service._validate_primary_worker_national_ids(parsed, batch)
+
+    def test_missing_programme_code_uses_pwp_national_id_requirement(self):
+        row = self._uploaded_row(2, "member-1", True)
+        row.values["national_id"] = None
+        parsed = WorkbookParseResult(rows=[row])
+        group_individual = SimpleNamespace(individual=SimpleNamespace(json_ext={}))
+        service = HouseholdValidationUploadService()
+
+        with patch.object(service, "_resolve_row", return_value=([], None, group_individual, None)):
+            validated = service._validate_primary_worker_national_ids(parsed, None)
+
+        self.assertEqual(validated.rows, [])
+        self.assertEqual(
+            validated.invalid_rows[0].error_code,
+            PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+        )
+
     def test_primary_worker_preflight_ignores_stored_value_for_blank_cell(self):
         group = self._group_with_primary_workers(True, False)
         rows = [
@@ -3176,6 +3376,44 @@ class UploadHardeningTest(TestCase):
             HouseholdValidationBatchRow.Status.APPLIED,
         )
 
+    def test_apply_row_keeps_stored_national_id_when_upload_cell_is_blank(self):
+        group = SimpleNamespace(id="group-1")
+        group_individual = SimpleNamespace(
+            individual=SimpleNamespace(id="individual-1", json_ext={"national_id": "OLD-001"}),
+        )
+        uploaded_row = UploadedValidationRow(
+            row_number=2,
+            values={
+                "group_uuid": "group-1",
+                "member_uuid": "member-1",
+                "form_number": "FORM-001",
+                "national_id": None,
+            },
+            verified=None,
+            primary_worker=None,
+            validation_date=None,
+            project_name=None,
+            project_id=None,
+            notes=None,
+        )
+        service = HouseholdValidationUploadService()
+
+        with (
+            patch.object(service, "_resolve_row", return_value=([], group, group_individual, None)),
+            patch.object(service, "_apply_national_id") as apply_national_id_mock,
+            patch.object(service, "_save_batch_row"),
+        ):
+            _, participant_updated = service._apply_row(
+                uploaded_row,
+                batch=MagicMock(),
+                upload_date=date.today(),
+                uploaded_at=datetime.now(),
+                allow_participant_update=True,
+            )
+
+        self.assertFalse(participant_updated)
+        apply_national_id_mock.assert_not_called()
+
     def test_apply_row_preserves_primary_worker_for_blank_cell(self):
         group = SimpleNamespace(id="group-1")
         group_individual = SimpleNamespace(
@@ -3458,10 +3696,21 @@ class UploadHardeningTest(TestCase):
         parse_workbook_mock,
     ):
         row = self._uploaded_row(2, "member-1", True)
+        invalid_row = self._uploaded_row(3, "member-2", True)
+        national_id_error = (
+            "Row 3: Please fill in a valid national_id for the selected primary worker"
+        )
         parse_workbook_mock.return_value = SimpleNamespace(
             rows=[row],
+            invalid_rows=[
+                InvalidWorkbookRow(
+                    uploaded_row=invalid_row,
+                    errors=[national_id_error],
+                    error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+                ),
+            ],
             rows_read=2,
-            errors=["Row 3: primary_worker must be YES or NO"],
+            errors=[national_id_error],
             invalid_group_keys=frozenset({"group-1"}),
         )
         batch = MagicMock(id="batch-1")
@@ -3482,6 +3731,8 @@ class UploadHardeningTest(TestCase):
             patch.object(service, "_replace_primary_worker") as replace_worker_mock,
             patch.object(service, "_apply_row", return_value=([], False)),
             patch.object(service, "_apply_group_validation_if_changed"),
+            patch.object(service, "_save_batch_row") as save_batch_row_mock,
+            patch.object(service, "_resolve_row", return_value=([], None, None, None)),
             patch(
                 "household_validation.services.transaction.atomic",
                 return_value=nullcontext(),
@@ -3494,10 +3745,24 @@ class UploadHardeningTest(TestCase):
             set(),
         )
         replace_worker_mock.assert_not_called()
+        save_batch_row_mock.assert_called_once_with(
+            batch,
+            invalid_row,
+            group=None,
+            group_individual=None,
+            project=None,
+            status=HouseholdValidationBatchRow.Status.ERROR,
+            error_message=national_id_error,
+            error_code=PRIMARY_WORKER_NATIONAL_ID_REQUIRED,
+        )
         self.assertEqual(result["rows_read"], 2)
         self.assertEqual(result["households_verified"], 0)
         self.assertEqual(result["participants_verified"], 0)
         self.assertEqual(result["errors"], 1)
+        self.assertEqual(
+            result["error_codes"],
+            [PRIMARY_WORKER_NATIONAL_ID_REQUIRED],
+        )
 
     @patch("household_validation.services.parse_validation_workbook")
     def test_upload_counts_only_successful_participants_as_not_verified(
@@ -4118,7 +4383,7 @@ class UploadHardeningTest(TestCase):
         )
 
 
-class BusinessVerificationRulesTest(TestCase):
+class BusinessVerificationRulesTest(LegacyBusinessColumnsTestMixin, TestCase):
     def test_business_answers_no_longer_require_primary_worker(self):
         # Corrected behaviour: has_business (and the rest of PWP's extra
         # columns) are optional, informational fields -- entering them on a
@@ -4176,6 +4441,8 @@ class BusinessVerificationRulesTest(TestCase):
                 columns = _all_columns()
                 for column, value in (("primary_worker", worker), (HAS_BUSINESS_COLUMN, business)):
                     sheet.cell(2, columns.index(column) + 1, value)
+                if worker == "YES":
+                    sheet.cell(2, columns.index("national_id") + 1, "NAT-001")
                 if business == "Yes":
                     sheet.cell(2, columns.index(BUSINESS_TYPE_COLUMN) + 1, "Crop farming")
                     sheet.cell(2, columns.index(BUSINESS_DURATION_COLUMN) + 1, 1)
