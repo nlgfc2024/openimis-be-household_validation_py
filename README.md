@@ -26,7 +26,6 @@ The module enables:
 - [Program-Based Selection](#program-based-selection)
 - [Configuration](#configuration)
 - [UMEP Individual Validation](#umep-individual-validation)
-- [UMEP configuration and rollout](docs/umep-individual-validation-rollout.md)
 - [Program-Specific Export Columns](#program-specific-export-columns)
 - [GraphQL API](#graphql-api)
 - [Excel Export and Upload](#excel-export-and-upload)
@@ -274,11 +273,12 @@ The first `targetCount` eligible households are selected.
 
 ## Configuration
 
-The module exposes three primary configuration sections:
+The module exposes four primary configuration sections:
 
 ```text
 program_eligibility_rules
 program_specific_export_columns
+individual_workbook_fields
 export_column_options_overrides
 ```
 
@@ -412,6 +412,52 @@ merge. Use the instance file as a whole; retain other programme entries explicit
 if configuring a shared deployment. The default module configuration remains
 household-only. Configuration rules are validated on save through the core module
 configuration registry and again at startup.
+
+### Enabling an individual programme
+
+Configure these blocks in the `household_validation` ModuleConfiguration, using
+the same programme code as the selected Phase:
+
+| Configuration block | Contract |
+| --- | --- |
+| `program_eligibility_rules["UMEP"]` | Set `subject` to `INDIVIDUAL` and optionally set `data_source` to the Phase's source. Omitted subjects retain the household workflow. |
+| `program_specific_export_columns["UMEP"]` | Define editable answers with the [supported column properties](#supported-properties). Match JSON field names, types and option strings to the enrolment profile's score inputs. |
+| `individual_workbook_fields["UMEP"]` | Define protected descriptive columns with `column_name` and exactly one `json_ext_key` or `location_type`; see the [workbook example](#saved-individual-lists-and-workbooks). |
+| `export_column_options_overrides` | Override dropdowns by editable column `key` across programmes. Use distinct keys when programmes need different options. |
+
+Build complete blocks before saving: top-level dictionaries replace defaults and
+are not deeply merged. In a shared instance, retain the PWP, UPG and RMEP entries
+alongside the individual programme. The maintained UMEP file describes an
+individual-only instance; copying its blocks alone would replace those household
+entries. Keep business definitions and ranking values in instance configuration,
+rather than application code. Save through ModuleConfiguration validation and
+restart backend workers to load the saved values. Changing a Phase's type alone
+does not enable individual validation.
+
+Configure enrolment separately with
+`registry_individual_verification_field: "validation_status"` and
+`registry_verified_individual_value: "VERIFIED"`, and match the Phase source and
+profile to the validation configuration. The maintained
+[UMEP enrolment configuration](https://github.com/nlgfc2024/coremis-configs/blob/main/enrolment/umep.enrollment.config.json)
+provides an instance example. Enrolment still applies its own eligibility,
+ranking threshold and capacity: VERIFIED does not enrol a person or guarantee a
+place. A person below the score threshold can remain in the unranked eligibility
+pool while being excluded from ranked selection. Phase capacity does not limit
+validation-list size.
+
+On the frontend, retain the R/D/W/V picker chain in `validationListFilters`.
+Individual defaults are `district`, `ta`, `gvh`, `village` and `targetCount`, with
+`excludeValidated` as an opt-in filter. Picker labels come from the instance
+language pack (`location.Location0Picker.label` through
+`location.Location3Picker.label`); omitting a workbook display column does not
+remove that geographic filter level. The contributed **Validate** action requires
+an individual programme, an editable context and rights `958001` and `958002`.
+Retain ordinary Individuals **Upload** and **Upload History** actions. Old
+`953xxx` rights do not authorize validation. Programme-discovery failures must
+offer a retry and preserve the household generation path. Saved history and error
+reports use `958003` and `958004` respectively, as detailed below.
+
+### Decision and household compatibility
 
 The individual decision contract is **VERIFIED / NOT_VERIFIED only**. Leading and
 trailing whitespace is trimmed and case normalised. Blank/null decisions skip the
@@ -1006,3 +1052,23 @@ cd openimis-be_py/openIMIS
 PYTHONPATH="<path-to-this-checkout>:$PYTHONPATH" \
 ../.venv/bin/python manage.py test household_validation --keepdb
 ```
+
+### Individual programme acceptance
+
+The acceptance suite uses synthetic records and real SQL update procedures.
+It runs with a self-contained synthetic configuration by default. To exercise
+an instance's validation columns and enrolment profile, supply both optional
+configuration paths together. From the assembled backend's `openIMIS` directory,
+using isolated test PostgreSQL:
+
+```bash
+UMEP_VALIDATION_CONFIG=/path/to/coremis-configs/household_validation/umep.household_validation.config.json \
+UMEP_ENROLMENT_CONFIG=/path/to/coremis-configs/enrolment/umep.enrollment.config.json \
+python manage.py test household_validation.test_umep_acceptance --keepdb --noinput
+python manage.py test social_protection.tests.test_beneficiary_update_validation_preservation \
+  social_protection.tests.test_workflows_beneficiaries_update \
+  enrolment.tests.test_services enrolment.tests.test_data_source --keepdb --noinput
+```
+
+Use compatible installed module revisions for cross-module checks. A skip for
+missing enrolment support or PostgreSQL does not verify acceptance.
