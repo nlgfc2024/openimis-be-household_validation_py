@@ -525,11 +525,12 @@ def _household(
     village_id=None,
     village_code=None,
     village_name=None,
+    head_age=50,
 ):
     head = _member(
         f"{household_id}-head",
         gender=head_gender,
-        age=50,
+        age=head_age,
         role="HEAD",
     )
     if eligible_members is None:
@@ -692,7 +693,7 @@ class HouseholdSelectionTest(TestCase):
     def test_select_households_applies_quota_categories(self):
         households = [
             _household("female", "Poorest", head_gender="Female"),
-            _household("youth", "Poorest", eligible_member_age=25),
+            _household("youth", "Poorest", eligible_member_age=25, head_age=25),
             _household("other", "Poorest"),
         ]
 
@@ -712,7 +713,7 @@ class HouseholdSelectionTest(TestCase):
         households = [
             _household("female-richer", "Richer", head_gender="Female"),
             _household("female-poorest", "Poorest", head_gender="Female"),
-            _household("youth", "Poorest", eligible_member_age=20),
+            _household("youth", "Poorest", eligible_member_age=20, head_age=20),
         ]
 
         result, _ = select_households(
@@ -726,7 +727,7 @@ class HouseholdSelectionTest(TestCase):
     def test_select_households_defaults_target_to_all_eligible_and_caps_reserve(self):
         households = [
             _household("female", "Poorest", head_gender="Female"),
-            _household("youth", "Poorer", eligible_member_age=20),
+            _household("youth", "Poorer", eligible_member_age=20, head_age=20),
         ]
 
         result, _ = select_households(households, rule={"selection_strategy": {}})
@@ -737,7 +738,7 @@ class HouseholdSelectionTest(TestCase):
     def test_select_households_adds_reserve_from_remaining_households(self):
         households = [
             _household("female", "Poorest", head_gender="Female"),
-            _household("youth", "Poorer", eligible_member_age=20),
+            _household("youth", "Poorer", eligible_member_age=20, head_age=20),
             _household("other", "Middle"),
         ]
 
@@ -906,9 +907,9 @@ class HouseholdSelectionTest(TestCase):
 
     def test_select_households_treats_ages_18_to_35_as_youth(self):
         households = [
-            _household("age-18", "Poorest", eligible_member_age=18),
-            _household("age-35", "Poorest", eligible_member_age=35),
-            _household("age-36", "Poorest", eligible_member_age=36),
+            _household("age-18", "Poorest", eligible_member_age=18, head_age=18),
+            _household("age-35", "Poorest", eligible_member_age=35, head_age=35),
+            _household("age-36", "Poorest", eligible_member_age=36, head_age=36),
         ]
 
         result, _ = select_households(
@@ -925,6 +926,16 @@ class HouseholdSelectionTest(TestCase):
         self.assertEqual(categories["age-35"], CATEGORY_YOUTH)
         self.assertEqual(categories["age-36"], CATEGORY_OTHER)
 
+    def test_youth_category_uses_the_head_age_rather_than_the_eligible_workers_age(self):
+        households = [
+            _household("young-worker", "Poorest", head_age=50, eligible_member_age=25),
+            _household("young-head", "Poorest", head_age=25, eligible_member_age=50),
+        ]
+        result, _ = select_households(households, target_count=2, rule={"selection_strategy": {}})
+        categories = {row.household.id: row.category for row in result.main}
+        self.assertEqual(categories["young-worker"], CATEGORY_OTHER)
+        self.assertEqual(categories["young-head"], CATEGORY_YOUTH)
+
     def test_is_truthy_accepts_ubr_boolean_shapes(self):
         for value in (True, 1, "1", "true", "TRUE", "yes", "Y"):
             self.assertTrue(is_truthy(value))
@@ -934,7 +945,7 @@ class HouseholdSelectionTest(TestCase):
     def test_select_households_uses_configured_percentages(self):
         households = [
             _household("female", "Poorest", head_gender="Female"),
-            _household("youth", "Poorest", eligible_member_age=25),
+            _household("youth", "Poorest", eligible_member_age=25, head_age=25),
             _household("other", "Poorest"),
         ]
 
@@ -952,7 +963,7 @@ class HouseholdSelectionTest(TestCase):
     def test_other_quota_absorbs_the_remainder_when_configured_percentages_total_below_100(self):
         households = (
             [_household(f"female-{i}", "Poorest", head_gender="Female") for i in range(5)]
-            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25) for i in range(5)]
+            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25, head_age=25) for i in range(5)]
             + [_household(f"other-{i}", "Poorest") for i in range(5)]
         )
 
@@ -970,7 +981,7 @@ class HouseholdSelectionTest(TestCase):
     def test_female_and_youth_quotas_are_normalized_when_configured_percentages_exceed_100(self):
         households = (
             [_household(f"female-{i}", "Poorest", head_gender="Female") for i in range(10)]
-            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25) for i in range(10)]
+            + [_household(f"youth-{i}", "Poorest", eligible_member_age=25, head_age=25) for i in range(10)]
         )
 
         result, summary = select_households(
@@ -2430,10 +2441,12 @@ class ExcelValidationListExporterTest(LegacyBusinessColumnsTestMixin, TestCase):
         rule = next(v for v in worksheet.data_validations.dataValidation
                     if f"{worker}2" in v.sqref)
         self.assertEqual(str(rule.sqref), f"{worker}2:{worker}4")
-        self.assertEqual(rule.formula1,
+        self.assertEqual(
+            rule.formula1,
             f'INDIRECT(IF(COUNTIFS(${group}$2:${group}$4,${group}2,'
             f'${worker}$2:${worker}$4,"YES")-COUNTIF(${worker}2,"YES")=0,'
-            f'"{PRIMARY_WORKER_ANSWERS_RANGE}","{PRIMARY_WORKER_NO_RANGE}"))')
+            f'"{PRIMARY_WORKER_ANSWERS_RANGE}","{PRIMARY_WORKER_NO_RANGE}"))',
+        )
         self.assertLessEqual(len(rule.formula1), 255)
         self.assertTrue(rule.showErrorMessage)
         self.assertEqual(rule.errorStyle, "stop")
@@ -4397,7 +4410,8 @@ class BusinessVerificationRulesTest(LegacyBusinessColumnsTestMixin, TestCase):
                 with (
                     patch.object(service, "_group", return_value=group),
                     patch.object(service, "_structural_errors", return_value=[]),
-                    patch.object(service, "_get_or_create_batch", return_value=MagicMock()) as batch,
+                    patch.object(service, "_get_or_create_batch",
+                                 return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})) as batch,
                     patch.object(service, "_replace_primary_worker", return_value=False) as replace_worker,
                     patch.object(service, "_save_batch_row") as audit,
                     patch("household_validation.services.IndividualService") as individual_service,
@@ -4496,7 +4510,8 @@ class PwpVerificationRulesTest(TestCase):
                 with (
                     patch.object(service, "_group", return_value=group),
                     patch.object(service, "_structural_errors", return_value=[]),
-                    patch.object(service, "_get_or_create_batch", return_value=MagicMock()) as batch,
+                    patch.object(service, "_get_or_create_batch",
+                                 return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})) as batch,
                     patch.object(service, "_replace_primary_worker", return_value=False) as replace_worker,
                     patch.object(service, "_save_batch_row"),
                     patch("household_validation.services.IndividualService") as individual_service,
@@ -4546,7 +4561,8 @@ class PwpVerificationRulesTest(TestCase):
         with (
             patch.object(service, "_group", return_value=group),
             patch.object(service, "_structural_errors", return_value=[]),
-            patch.object(service, "_get_or_create_batch", return_value=MagicMock()),
+            patch.object(service, "_get_or_create_batch",
+                         return_value=MagicMock(json_ext={"benefit_plan_code": "PWP"})),
             patch.object(service, "_save_primary_worker_rejection"),
             patch.object(service, "_apply_row") as apply_row,
             patch.object(service, "_replace_primary_worker") as replace_worker,

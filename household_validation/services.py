@@ -1,7 +1,7 @@
 import json
 from dataclasses import dataclass, replace
 from datetime import date
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
@@ -13,9 +13,10 @@ from individual.models import Group, GroupIndividual
 from individual.services import GroupIndividualService, IndividualService
 from project_social_protection.models import Project
 
+from household_validation.household_batches import resolve_household_batch
 from household_validation.geography import ValidationGeographyMixin
 from household_validation.programmes import (
-    HOUSEHOLD, INDIVIDUAL, resolve_programme_rule, resolve_programme_columns,
+    HOUSEHOLD, resolve_programme_rule, resolve_programme_columns,
     requires_primary_worker_national_id,
 )
 from household_validation.excel import (
@@ -79,11 +80,10 @@ class HouseholdValidationUploadService:
         self._member_details_changed_group_ids = set()
         self._upload_attempt_id = None
         parsed = parse_validation_workbook(file_or_bytes)
-        batch = (
-            self._existing_household_batch(self._batch_id(parsed))
-            if dry_run
-            else self._get_or_create_batch(parsed, source_file_name=source_file_name)
-        )
+        if dry_run:
+            _, batch = resolve_household_batch(self._batch_ids(parsed))
+        else:
+            batch = self._get_or_create_batch(parsed, source_file_name=source_file_name)
         parsed = self._validate_primary_worker_national_ids(parsed, batch)
         totals = {
             "rows_read": parsed.rows_read,
@@ -317,8 +317,7 @@ class HouseholdValidationUploadService:
     def _validate_primary_worker_national_ids(self, parsed, batch):
         """Apply the programme rule after resolving the uploaded batch.
 
-        The parser deliberately stays database-free. Here we can determine the
-        programme from the generated batch and accept an ID already stored on
+        Use the generated batch's programme and accept an ID already stored on
         the selected member when the workbook cell is blank.
         """
         # Upload parsing always returns WorkbookParseResult.  Keeping this
@@ -553,21 +552,8 @@ class HouseholdValidationUploadService:
     def _uploaded_group_key(uploaded_row):
         return str(uploaded_row.values.get("group_uuid") or "").strip()
 
-    @staticmethod
-    def _existing_household_batch(batch_id):
-        if batch_id:
-            batch = HouseholdValidationBatch.objects.filter(id=batch_id).first()
-            if batch:
-                # Reject every individual subject, including unsupported/deleted
-                # saved-list formats, before household status or rows can change.
-                if (batch.json_ext or {}).get("subject") == INDIVIDUAL:
-                    raise ValidationError("Household uploads cannot use an individual validation batch.")
-                return batch
-        return None
-
     def _get_or_create_batch(self, parsed, source_file_name=None):
-        batch_id = self._batch_id(parsed)
-        existing = self._existing_household_batch(batch_id)
+        batch_id, existing = resolve_household_batch(self._batch_ids(parsed))
         if existing is not None:
             return existing
         batch = HouseholdValidationBatch(
@@ -579,8 +565,9 @@ class HouseholdValidationUploadService:
         batch.save(user=self.user)
         return batch
 
-    def _batch_id(self, parsed):
-        batch_ids = {
+    @staticmethod
+    def _batch_ids(parsed):
+        return (
             row.values.get("batch_id")
             for row in [
                 *parsed.rows,
@@ -589,15 +576,7 @@ class HouseholdValidationUploadService:
                     for invalid_row in getattr(parsed, "invalid_rows", [])
                 ],
             ]
-            if row.values.get("batch_id")
-        }
-        if len(batch_ids) != 1:
-            return None
-        batch_id = next(iter(batch_ids))
-        try:
-            return UUID(str(batch_id))
-        except ValueError:
-            return None
+        )
 
     def _resolve_row(self, uploaded_row):
         errors = []
