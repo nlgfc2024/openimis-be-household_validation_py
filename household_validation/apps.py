@@ -114,6 +114,9 @@ DEFAULT_CONFIG = {
     # - member_flag: a member must have this Individual.json_ext boolean
     #   key to count towards the household's eligible members (a hard
     #   requirement, unlike priority_flag below).
+    # - requires_primary_worker: optional JSON boolean (default false).
+    #   Require truthy GroupIndividual.json_ext.primary_worker, independently
+    #   of Individual.json_ext, recipient_type and household-head role.
     # - member_min_age / member_max_age: inclusive age bounds a member must
     #   also fall within to be eligible.
     # - priority_flag: a boolean key that ranks eligible households ahead
