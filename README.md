@@ -321,11 +321,49 @@ selection_strategy
 requires_data_source
 requires_recipient_type
 member_flag
+requires_primary_worker
 member_min_age
 member_max_age
 priority_flag
 require_primary_worker_national_id
 ```
+
+`requires_primary_worker` is an optional JSON boolean for household programmes.
+When `true`, only members with a truthy
+`GroupIndividual.json_ext.primary_worker` are eligible. Missing, null or false
+worker flags exclude a member. Omitted or `false` preserves existing selection
+behaviour. A primary recipient or household head does not qualify without this
+membership flag. Existing `member_flag` rules continue to read
+`Individual.json_ext`; `member_flag: "primary_worker"` does not read the
+membership's worker designation.
+
+For an instance using existing PWP-sourced records for RMEP, update its RMEP rule
+under `program_eligibility_rules`:
+
+```json
+"RMEP": {
+    "requires_data_source": "PWP",
+    "requires_primary_worker": true,
+    "priority_flag": "business_experience"
+}
+```
+
+The worker filter applies before household selection, so eligible-member counts,
+preview and Excel rows all use the same restricted members. A household with five
+members and one qualifying worker produces one member row; households with no
+qualifying members are excluded. Population totals still describe all active
+members in scope, and `target_count` still counts households. Multiple flagged
+members remain eligible; this rule does not choose a replacement worker.
+
+This uses the flag already stored in the instance, without checking remote PWP
+enrolment or changing imports, worker assignments or upload decisions. Keep
+`subject` omitted or `HOUSEHOLD`; `INDIVIDUAL` validation does not support this
+rule. Select RMEP explicitly (`benefitPlanCode: "RMEP"`); an omitted programme
+code retains the existing PWP fallback. Apply the RMEP override only after
+deploying backend support, preserve the other programme rules and export-column
+settings, and reload the affected application processes after updating the
+`household_validation` backend ModuleConfiguration. No database migration is
+required.
 
 PWP enables `require_primary_worker_national_id` by default. A selected primary
 worker must therefore have a national ID either in the uploaded workbook or

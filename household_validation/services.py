@@ -1327,6 +1327,9 @@ class EligibleHouseholdSelectionService(ValidationGeographyMixin):
             data_source=json_ext.get("data_source"),
             json_ext=json_ext,
             source=group_individual,
+            primary_worker=is_truthy(
+                (group_individual.json_ext or {}).get("primary_worker")
+            ),
         )
 
     def _is_fit_for_work(self, group_individual):

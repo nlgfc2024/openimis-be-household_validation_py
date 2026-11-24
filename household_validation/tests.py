@@ -60,6 +60,7 @@ from household_validation.project_lookup import (
     ProjectOption,
     project_option_from_project,
 )
+from household_validation.programmes import programme_rules
 from household_validation.selection import (
     CATEGORY_FEMALE_HEADED,
     CATEGORY_OTHER,
@@ -1309,6 +1310,170 @@ class ProgramBasedGenerationIntegrationTest(TestCase):
         self.assertEqual(summary["selected_female_headed_households"], 0)
 
 
+class PrimaryWorkerSelectionTest(TestCase):
+    def setUp(self):
+        self.rule = {
+            "requires_data_source": "PWP",
+            "requires_primary_worker": True,
+            "priority_flag": "business_experience",
+        }
+        self.rules = {
+            "PWP": DEFAULT_CONFIG["program_eligibility_rules"]["PWP"],
+            "RMEP": self.rule,
+            "UPG": {"requires_data_source": "SCTP", "member_flag": "fit_for_work"},
+        }
+        patcher = patch.object(HouseholdValidationConfig, "program_eligibility_rules", self.rules)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def member(self, name, membership_json=None, source="pwp", individual_json=None):
+        group = _fake_group(
+            name, name, "Male", 40, "Middle",
+            individual_json_ext={"data_source": source, **(individual_json or {})},
+        )
+        membership = group.groupindividuals.all()[0]
+        membership.json_ext = membership_json
+        membership.role = None
+        membership.recipient_type = None
+        return membership
+
+    def households(self):
+        group = _fake_group("household", "HH-001", "Male", 40, "Middle")
+        head = self.member("head", {"primary_worker": False}, individual_json={"primary_worker": True})
+        head.role = "HEAD"
+        recipient = self.member("recipient", {"primary_worker": False})
+        recipient.recipient_type = "PRIMARY"
+        self.worker = self.member("worker", {"primary_worker": True})
+        group.groupindividuals = _FakeRelatedManager([
+            head, recipient, self.worker, self.member("missing"),
+            self.member("other-source", {"primary_worker": True}, source="sctp"),
+        ])
+        no_worker = _fake_group("no-worker", "HH-002", "Male", 40, "Middle")
+        no_worker.groupindividuals = _FakeRelatedManager([
+            self.member("unflagged"), self.member("false", {"primary_worker": False}),
+        ])
+        return [group, no_worker]
+
+    def test_generation_preview_and_excel_include_only_membership_worker(self):
+        service = _FakeSelectionService(self.households())
+        result, summary = service.generate(benefit_plan_code="RMEP")
+        self.assertEqual([row.member.id for row in result.member_rows], [self.worker.individual_id])
+        self.assertEqual(summary["total_households"], 2)
+        self.assertEqual(summary["total_individuals"], 7)
+        self.assertEqual(summary["eligible_households"], 1)
+        self.assertEqual(summary["eligible_individuals"], 1)
+        self.assertEqual(summary["selected_households"], 1)
+        self.assertEqual(summary["selected_individuals"], 1)
+        preview = service.preview(benefit_plan_code="RMEP")
+        self.assertEqual([row.individual_uuid for row in preview], [str(self.worker.individual_id)])
+        workbook = load_workbook(BytesIO(ExcelValidationListExporter(result, batch_id="batch").export_bytes()))
+        sheet = workbook[VALIDATION_LIST_SHEET]
+        headers = [cell.value for cell in sheet[1]]
+        self.assertEqual(sheet.max_row, 2)
+        self.assertEqual(sheet.cell(2, headers.index("member_uuid") + 1).value, str(self.worker.individual_id))
+
+    def test_worker_requirement_does_not_accept_individual_flag_head_or_primary_recipient(self):
+        service = _FakeSelectionService(self.households())
+        members = [service._build_member(member) for member in service.groups[0].groupindividuals.all()]
+        self.assertEqual([member.id for member in members if member.is_eligible(self.rule)],
+                         [self.worker.individual_id])
+
+    def test_membership_worker_flag_uses_existing_truthy_normalisation(self):
+        service = EligibleHouseholdSelectionService()
+        for value in (True, 1, "true", "YES", "1"):
+            with self.subTest(value=value):
+                member = service._build_member(self.member("worker", {"primary_worker": value}))
+                self.assertTrue(member.is_eligible(self.rule))
+        for payload in (None, {}, {"primary_worker": None}, {"primary_worker": False},
+                        {"primary_worker": 0}, {"primary_worker": "false"}, {"primary_worker": "No"}):
+            with self.subTest(payload=payload):
+                member = service._build_member(self.member("not-worker", payload))
+                self.assertFalse(member.is_eligible(self.rule))
+
+    def test_member_flag_still_reads_individual_json(self):
+        service = EligibleHouseholdSelectionService()
+        worker = service._build_member(self.member("worker", {"primary_worker": True}))
+        self.assertFalse(worker.is_eligible({"member_flag": "primary_worker"}))
+        individual_flag = service._build_member(self.member(
+            "individual-flag", {}, individual_json={"primary_worker": True},
+        ))
+        self.assertTrue(individual_flag.is_eligible({"member_flag": "primary_worker"}))
+        self.assertFalse(individual_flag.is_eligible(self.rule))
+
+    def test_false_or_omitted_requirement_preserves_existing_rmep_selection(self):
+        for rule in ({key: value for key, value in self.rule.items() if key != "requires_primary_worker"},
+                     {**self.rule, "requires_primary_worker": False}):
+            with self.subTest(rule=rule):
+                self.rules["RMEP"] = rule
+                result, summary = _FakeSelectionService(self.households()).generate(benefit_plan_code="RMEP")
+                self.assertEqual(len(result.member_rows), 6)
+                self.assertEqual(summary["selected_households"], 2)
+
+    def test_false_worker_only_rule_preserves_empty_rule_fit_for_work_fallback(self):
+        for fit_for_work in (True, False):
+            member = EligibleMember(id="member", fit_for_work=fit_for_work)
+            self.assertFalse(member.primary_worker)
+            self.assertEqual(member.is_eligible({"requires_primary_worker": False}), member.is_eligible({}))
+
+    def test_pwp_default_and_upg_selection_are_unchanged(self):
+        service = _FakeSelectionService(self.households())
+        result, _ = service.generate()
+        self.assertEqual(len(result.member_rows), 7)
+        # UPG must still accept an unflagged SCTP member.
+        sctp_member = service.groups[0].groupindividuals.all()[-1]
+        sctp_member.json_ext = {}
+        result, _ = service.generate(benefit_plan_code="UPG")
+        self.assertEqual([row.member.id for row in result.member_rows], [sctp_member.individual_id])
+
+    def test_deleted_memberships_and_individuals_are_excluded(self):
+        for deleted_field in ("membership", "individual"):
+            with self.subTest(deleted_field=deleted_field):
+                service = _FakeSelectionService(self.households())
+                deleted = self.worker if deleted_field == "membership" else self.worker.individual
+                deleted.is_deleted = True
+                result, summary = service.generate(benefit_plan_code="RMEP")
+                self.assertEqual(result.member_rows, [])
+                self.assertEqual(summary["eligible_households"], 0)
+
+    def test_multiple_flagged_members_are_not_silently_replaced_or_dropped(self):
+        groups = self.households()
+        second = self.member("second-worker", {"primary_worker": True})
+        groups[0].groupindividuals.rows.append(second)
+        result, summary = _FakeSelectionService(groups).generate(benefit_plan_code="RMEP", target_count=1)
+        self.assertEqual({row.member.id for row in result.member_rows},
+                         {self.worker.individual_id, second.individual_id})
+        self.assertEqual(summary["selected_households"], 1)
+        self.assertEqual(summary["selected_individuals"], 2)
+
+    def test_config_accepts_only_json_booleans(self):
+        for value in (True, False):
+            self.assertEqual(programme_rules({"RMEP": {"requires_primary_worker": value}}),
+                             {"RMEP": {"requires_primary_worker": value}})
+        for value in (None, 0, 1, "true", "false", "", [], {}):
+            with self.subTest(value=value), self.assertRaisesRegex(ValidationError, "must be a boolean"):
+                programme_rules({"RMEP": {"requires_primary_worker": value}})
+
+    def test_invalid_flag_rejected_on_load_before_existing_rules_change(self):
+        with self.assertRaises(ValidationError):
+            HouseholdValidationConfig._load_config({
+                "program_eligibility_rules": {"RMEP": {"requires_primary_worker": "true"}},
+            })
+        self.assertEqual(HouseholdValidationConfig.program_eligibility_rules, self.rules)
+
+    def test_invalid_flag_rejected_by_save_validator(self):
+        from django.apps import apps
+
+        with self.assertRaises(ValidationError) as error:
+            apps.get_app_config("household_validation")._validate_module_config(SimpleNamespace(_cfg={
+                "program_eligibility_rules": {"RMEP": {"requires_primary_worker": 1}},
+            }))
+        self.assertIn("config", error.exception.message_dict)
+
+    def test_individual_subject_does_not_silently_ignore_worker_requirement(self):
+        with self.assertRaises(ValidationError):
+            programme_rules({"RMEP": {"subject": "INDIVIDUAL", "requires_primary_worker": True}})
+
+
 class HotspotAndMicroCatchmentResolutionTest(TestCase):
     @patch("household_validation.geography.Hotspot.objects.filter")
     def test_resolve_hotspot_filters_by_uuid_code_and_validity(self, filter_mock):
@@ -1716,6 +1881,7 @@ def _fake_group(
     group_individual = SimpleNamespace(
         id=f"{group_id}-member",
         is_deleted=False,
+        json_ext={},
         role="HEAD",
         recipient_type=recipient_type,
         individual=individual,
@@ -4313,6 +4479,7 @@ class UploadHardeningTest(TestCase):
         )
         return SimpleNamespace(
             id=f"membership-{member_id}",
+            json_ext={},
             individual_id=individual.id,
             individual=individual,
             role=role,

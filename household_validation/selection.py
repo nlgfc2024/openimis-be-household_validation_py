@@ -35,6 +35,7 @@ class EligibleMember:
     data_source: str | None = None
     json_ext: dict = field(default_factory=dict)
     source: Any = None
+    primary_worker: bool = False
 
     @property
     def age(self) -> int | None:
@@ -50,10 +51,16 @@ class EligibleMember:
 
         With no program-specific ``rule``, a member is eligible iff they're fit for work.
         A rule can instead require a specific ``data_source``, ``recipient_type``, a truthy
-        ``json_ext`` flag, and/or an inclusive age range.
+        Individual ``json_ext`` flag, membership primary-worker designation,
+        and/or an inclusive age range.
         """
-        if not rule:
+        # A disabled worker-only rule must retain the legacy fit-for-work
+        # fallback rather than turning an otherwise empty rule into "all".
+        if not rule or rule == {"requires_primary_worker": False}:
             return self.fit_for_work
+
+        if rule.get("requires_primary_worker", False) and not self.primary_worker:
+            return False
 
         required_data_source = rule.get("requires_data_source")
         if required_data_source:

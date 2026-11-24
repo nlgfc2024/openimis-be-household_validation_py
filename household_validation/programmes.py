@@ -24,6 +24,8 @@ def programme_rules(rules):
             raise ValidationError(f"Duplicate validation programme code: {code}")
         if not isinstance(rule, dict):
             raise ValidationError(f"Validation rule for {code} must be an object.")
+        if "requires_primary_worker" in rule and not isinstance(rule["requires_primary_worker"], bool):
+            raise ValidationError(f"requires_primary_worker for {code} must be a boolean.")
         if (
             "require_primary_worker_national_id" in rule
             and not isinstance(rule["require_primary_worker_national_id"], bool)
