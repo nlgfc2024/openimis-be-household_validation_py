@@ -8,7 +8,7 @@ from individual.data_source import DEFAULT_DATA_SOURCE, data_source_q
 from individual.models import GroupIndividual, Individual
 
 from household_validation.geography import ValidationGeographyMixin
-from household_validation.programmes import INDIVIDUAL, resolve_programme_rule
+from household_validation.programmes import INDIVIDUAL, json_ext_requirement_q, resolve_programme_rule
 from household_validation.verification import INDIVIDUAL_DECISIONS
 
 
@@ -34,6 +34,8 @@ class EligibleIndividualSelectionService(ValidationGeographyMixin):
         queryset = Individual.get_queryset(Individual.objects.filter(is_deleted=False), self.user)
         # Use the same source-key and legacy untagged-record semantics as enrolment.
         queryset = queryset.filter(data_source_q(rule.get("data_source", DEFAULT_DATA_SOURCE)))
+        # e.g. only applicants the UMEP desk appraisal shortlisted
+        queryset = queryset.filter(json_ext_requirement_q(rule))
         if exclude_validated:
             # JSON key exclusion alone drops missing keys through SQL NULL;
             # unassessed people must remain candidates.

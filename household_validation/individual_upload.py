@@ -25,6 +25,7 @@ from household_validation.individual_workbook import (
     parse_individual_validation_workbook, workbook_batch_id,
 )
 from household_validation.models import HouseholdValidationBatch, HouseholdValidationBatchRow
+from household_validation.programmes import json_ext_requirement_q
 from household_validation.verification import VERIFIED, NOT_VERIFIED
 
 
@@ -147,7 +148,8 @@ class IndividualValidationUploadService:
                     individual_id__in=selected, is_deleted=False, group__is_deleted=False,
                     individual__is_deleted=False,
                 ).values("individual_id")
-                eligible = scoped.filter(data_source_q(source)).exclude(pk__in=active)
+                eligible = scoped.filter(data_source_q(source), json_ext_requirement_q(batch.json_ext["rule"]))
+                eligible = eligible.exclude(pk__in=active)
                 eligible = self._apply_saved_geography(eligible, geography)
                 eligible_ids = {str(pk) for pk in eligible.values_list("pk", flat=True)}
                 deleted_ids = {str(pk) for pk in Individual.objects.filter(
@@ -171,7 +173,10 @@ class IndividualValidationUploadService:
                         elif person is None:
                             errors.append("Individual is outside your current access.")
                         elif row.individual_id not in eligible_ids:
-                            errors.append("Individual no longer meets the saved source, household or geographic scope.")
+                            errors.append(
+                                "Individual no longer meets the saved source, programme requirement, household or "
+                                "geographic scope."
+                            )
                     current = person.json_ext if person is not None and isinstance(person.json_ext, dict) else {}
                     updates = {}
                     if not errors and row.decision is not None:

@@ -425,14 +425,20 @@ The module logs warnings when retired configuration keys are detected.
 
 Add `"UMEP": {"subject": "INDIVIDUAL", "data_source": "ubr"}` to the
 existing `program_eligibility_rules`. Omitted subjects remain `HOUSEHOLD`; other
-subject values are rejected. Individual rules accept `subject` and an optional
-non-empty `data_source` only. Set the source to the UMEP Phase's
+subject values are rejected. Individual rules accept `subject`, an optional
+non-empty `data_source` and an optional `requires_json_ext` only. Set the source to the UMEP Phase's
 `json_ext.data_source`; when omitted, both validation and enrolment default to
 `ubr`, including legacy missing, null and empty source tags. Surrounding whitespace
 in a configured individual source is stripped when read; case is preserved and
 other source keys match exactly. Candidates are accessible, non-deleted individuals
 outside active households, filtered through `Individual.location` and ordered by primary key.
 Targets count people.
+
+`requires_json_ext` keeps only individuals whose `json_ext` carries every listed
+top-level key with exactly that string, number or boolean, e.g.
+`{"umep_2026_r1_desk_appraisal": "SHORTLISTED"}` for applicants the UMEP 2026-R1
+desk appraisal shortlisted (the appraisal's `shortlist.individual_field`). It is saved with the list, and upload rejects rows whose individual
+no longer matches it. Omitted, selection is unchanged.
 
 The source-rule names deliberately retain different matching contracts:
 household `requires_data_source` is an optional member eligibility requirement,
@@ -458,7 +464,7 @@ the same programme code as the selected Phase:
 
 | Configuration block | Contract |
 | --- | --- |
-| `program_eligibility_rules["UMEP"]` | Set `subject` to `INDIVIDUAL` and optionally set `data_source` to the Phase's source. Omitted subjects retain the household workflow. |
+| `program_eligibility_rules["UMEP"]` | Set `subject` to `INDIVIDUAL` and optionally set `data_source` to the Phase's source and `requires_json_ext` to the required individual values. Omitted subjects retain the household workflow. |
 | `program_specific_export_columns["UMEP"]` | Define editable answers with the [supported column properties](#supported-properties). Match JSON field names, types and option strings to the enrolment profile's score inputs. |
 | `individual_workbook_fields["UMEP"]` | Define protected descriptive columns with `column_name` and exactly one `json_ext_key` or `location_type`; see the [workbook example](#saved-individual-lists-and-workbooks). |
 | `export_column_options_overrides` | Override dropdowns by editable column `key` across programmes. Use distinct keys when programmes need different options. |

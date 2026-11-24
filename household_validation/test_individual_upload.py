@@ -20,6 +20,7 @@ from individual.models import Group, GroupIndividual, Individual
 from location.models import Location
 
 from household_validation import test_individual_workbook as fixtures
+from household_validation.apps import HouseholdValidationConfig
 from household_validation.individual_upload import IndividualValidationUploadService
 from household_validation.individual_snapshots import iter_selection, selection_rows
 from household_validation.individual_workbook import INDIVIDUAL_SHEET, METADATA_SHEET
@@ -77,6 +78,26 @@ class IndividualValidationUploadTests(TestCase):
         self.assertEqual(memberships, list(GroupIndividual.objects.values_list("pk", "json_ext", "recipient_type")))
         self.assertEqual(batch.rows.filter(upload_attempt_id__isnull=False).count(), 3)
         self.assertEqual(len(self.uploader.history(batch.pk)), 1)
+
+    def test_json_ext_requirement_is_rechecked_on_upload(self):
+        for person in Individual.objects.all():
+            person.json_ext = {**(person.json_ext or {}), "desk_appraisal_status": "SHORTLISTED"}
+            person.save(user=self.actor)
+        rules = {"UMEP": {"subject": "INDIVIDUAL", "requires_json_ext": {"desk_appraisal_status": "SHORTLISTED"}}}
+        with patch.object(HouseholdValidationConfig, "program_eligibility_rules", rules):
+            batch, workbook, _ = self.make_upload(("VERIFIED", "VERIFIED"))
+        self.assertEqual(batch.json_ext["rule"]["requires_json_ext"], {"desk_appraisal_status": "SHORTLISTED"})
+        dropped, kept = [row["individual_uuid"] for row in iter_selection(batch)]
+        person = Individual.objects.get(pk=dropped)
+        person.json_ext = {**person.json_ext, "desk_appraisal_status": "NOT_SHORTLISTED"}
+        person.save(user=self.actor)
+        # The saved rule applies even after the configuration changes
+        result = self.uploader.upload(self.serialise(workbook))
+        self.assertEqual(result["rows_applied"], 1)
+        self.assertEqual(result["errors"], 1)
+        self.assertIn("programme requirement", result["error_messages"][0])
+        self.assertNotIn("validation_status", Individual.objects.get(pk=dropped).json_ext)
+        self.assertEqual(Individual.objects.get(pk=kept).json_ext["validation_status"], "VERIFIED")
 
     def test_dry_run_has_identical_decisions_but_no_persistent_changes(self):
         batch, workbook, _ = self.make_upload()

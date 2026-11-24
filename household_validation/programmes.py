@@ -2,6 +2,7 @@
 from copy import deepcopy
 
 from django.core.exceptions import ValidationError
+from django.db.models import Q
 from individual.data_source import DEFAULT_DATA_SOURCE
 
 from household_validation.apps import DEFAULT_CONFIG, HouseholdValidationConfig, apply_column_option_overrides
@@ -10,6 +11,24 @@ from household_validation.verification import INDIVIDUAL_DECISIONS
 
 HOUSEHOLD = "HOUSEHOLD"
 INDIVIDUAL = "INDIVIDUAL"
+INDIVIDUAL_RULE_KEYS = {"subject", "data_source", "requires_json_ext"}
+
+
+def _json_ext_requirement(code, required):
+    # Top-level json_ext keys with the exact scalar each candidate must carry, e.g. a desk appraisal result
+    if not isinstance(required, dict) or not required:
+        raise ValidationError(f"requires_json_ext for {code} must be a non-empty object.")
+    for key, value in required.items():
+        if not isinstance(key, str) or not key.strip():
+            raise ValidationError(f"requires_json_ext keys for {code} must be non-empty strings.")
+        if value is None or not isinstance(value, (str, int, float, bool)):
+            raise ValidationError(f"requires_json_ext values for {code} must be strings, numbers or booleans.")
+
+
+def json_ext_requirement_q(rule):
+    """The rule's requires_json_ext as a filter on Individual (json_ext contains every key and value)."""
+    required = rule.get("requires_json_ext")
+    return Q(json_ext__contains=required) if required else Q()
 
 
 def programme_rules(rules):
@@ -39,8 +58,12 @@ def programme_rules(rules):
         # Individual v1 selects by source, geography and absence of active membership.
         # Never silently apply/ignore household member or quota rules here.
         if subject == INDIVIDUAL:
-            if set(rule) - {"subject", "data_source"}:
-                raise ValidationError(f"Individual validation rule for {code} supports only subject and data_source.")
+            if set(rule) - INDIVIDUAL_RULE_KEYS:
+                raise ValidationError(
+                    f"Individual validation rule for {code} supports only subject, data_source and requires_json_ext."
+                )
+            if "requires_json_ext" in rule:
+                _json_ext_requirement(code, rule["requires_json_ext"])
             source = rule.get("data_source", DEFAULT_DATA_SOURCE)
             if not isinstance(source, str) or not source.strip():
                 raise ValidationError(f"Individual validation data_source for {code} must be a non-empty string.")
