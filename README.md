@@ -398,8 +398,8 @@ Targets count people.
 
 `requires_json_ext` keeps only individuals whose `json_ext` carries every listed
 top-level key with exactly that string, number or boolean, e.g.
-`{"desk_appraisal_status": "SHORTLISTED"}` for applicants the UMEP desk appraisal
-shortlisted. It is saved with the list, and upload rejects rows whose individual
+`{"umep_2026_r1_desk_appraisal": "SHORTLISTED"}` for applicants the UMEP 2026-R1
+desk appraisal shortlisted (the appraisal's `shortlist.individual_field`). It is saved with the list, and upload rejects rows whose individual
 no longer matches it. Omitted, selection is unchanged.
 
 The source-rule names deliberately retain different matching contracts:
