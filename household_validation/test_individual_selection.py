@@ -64,6 +64,13 @@ class ProgrammeSubjectTests(TestCase):
         with self.assertRaises(ValidationError):
             programme_rules({"UMEP": {"subject": "INDIVIDUAL", "selection_strategy": {}}})
 
+    def test_json_ext_requirement_is_optional_and_validated(self):
+        valid = {"UMEP": {"subject": "INDIVIDUAL", "requires_json_ext": {"desk_appraisal_status": "SHORTLISTED"}}}
+        self.assertEqual(programme_rules(valid)["UMEP"]["requires_json_ext"], {"desk_appraisal_status": "SHORTLISTED"})
+        for required in (None, {}, [], "SHORTLISTED", {"": "x"}, {"status": None}, {"status": ["A"]}, {"status": {}}):
+            with self.subTest(required=required), self.assertRaises(ValidationError):
+                programme_rules({"UMEP": {"subject": "INDIVIDUAL", "requires_json_ext": required}})
+
     def test_individual_source_must_be_a_nonempty_string(self):
         for source in (None, "", "  ", True, 1, [], {}):
             with self.subTest(source=source), self.assertRaises(ValidationError):
@@ -270,6 +277,19 @@ class IndividualSelectionDatabaseTests(DjangoTestCase):
         self.assertFalse(page["hasNextPage"])
         self.assertEqual(len(page["items"]), 1)
         self.assertNotIn(page["items"][0]["id"], [str(self.standalone.pk), str(self.second.pk)])
+
+    def test_json_ext_requirement_selects_exactly_the_matching_individuals(self):
+        without = self.ids()
+        Individual.objects.filter(pk=self.standalone.pk).update(json_ext={"desk_appraisal_status": "SHORTLISTED"})
+        Individual.objects.filter(pk=self.second.pk).update(json_ext={"desk_appraisal_status": "NOT_SHORTLISTED"})
+        Individual.objects.filter(pk=self.active_member.pk).update(json_ext={"desk_appraisal_status": "SHORTLISTED"})
+        self.assertEqual(self.ids(), without)
+        with patch.object(HouseholdValidationConfig, "program_eligibility_rules", {"UMEP": {
+            "subject": "INDIVIDUAL", "requires_json_ext": {"desk_appraisal_status": "SHORTLISTED"},
+        }}):
+            # Still excludes active household members
+            self.assertEqual(self.ids(), {self.standalone.pk})
+            self.assertEqual(self.service.select("UMEP").eligible_individuals, 1)
 
     def test_source_filter_matches_enrolment_and_excludes_other_sources(self):
         plan = SimpleNamespace(json_ext={"data_source": "umep"})
